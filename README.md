@@ -24,5 +24,5 @@ MIT
 ## Development
 
     uv venv -p 3.13 .venv
-    uv pip install --python .venv "hermes-agent @ git+https://github.com/NousResearch/hermes-agent@524041b9d0437cd4424a524af4b9e26145e69ab0" pytest==9.1.1 ruff==0.15.10
+    git clone --filter=blob:none https://github.com/NousResearch/hermes-agent.git .hermes-src && git -C .hermes-src checkout --quiet 524041b9d0437cd4424a524af4b9e26145e69ab0 && uv pip install --python .venv -e .hermes-src pytest==9.1.1 ruff==0.15.10
     .venv/bin/ruff check . && .venv/bin/pytest
