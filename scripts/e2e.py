@@ -62,11 +62,30 @@ def main(argv: list[str]) -> int:
         if s.docker:
             r = env.execute("docker run --rm alpine:3.24.2 echo hello-from-inner", timeout=300)
             check("docker run", "hello-from-inner" in r["output"], r["output"].strip()[-100:])
+        def alive(pidfile):
+            probe = (f'p=$(cat {pidfile}) && if kill -0 "$p" 2>/dev/null; '
+                     'then echo alive; else echo gone; fi')
+            return env.execute(probe)["output"].strip().endswith("alive")
+
+        # Positive control: prove the pid probe can see a live process before trusting "gone".
+        env.execute("sleep 300 > /dev/null 2>&1 & echo $! > /tmp/e2e-control.pid")
+        control_ok = alive("/tmp/e2e-control.pid")
+        check("pid probe sees a live process (positive control)", control_ok,
+              "" if control_ok else "probe cannot see processes")
+        env.execute('kill "$(cat /tmp/e2e-control.pid)"')
         t0 = time.time()
-        r = env.execute("sleep 120", timeout=5)
-        check("timeout returns promptly", time.time() - t0 < 30, f"{time.time() - t0:.1f}s")
-        r = env.execute("pgrep -f 'sleep 120' || echo none")
-        check("timeout killed remote process", r["output"].strip().endswith("none"), r["output"].strip()[:100])
+        r = env.execute("echo $$ > /tmp/e2e-sleeper.pid; exec sleep 120", timeout=5)
+        elapsed = time.time() - t0
+        check("timeout returns promptly with returncode 124", elapsed < 30 and r["returncode"] == 124,
+              f"{elapsed:.1f}s returncode={r['returncode']}")
+        gone = False
+        for _ in range(7):  # remote kill escalates TERM -> KILL within ~2 s
+            if not alive("/tmp/e2e-sleeper.pid"):
+                gone = True
+                break
+            time.sleep(0.5)
+        check("timeout killed remote process", gone and control_ok,
+              "" if gone else "still alive after ~3 s")
         env._client.delete_pod(env._id.pod_name, grace_seconds=0)
         env._wait_gone(env._id.pod_name)
         r = env.execute("echo back")
