@@ -36,6 +36,7 @@ def main(argv: list[str]) -> int:
         print(f"settings file not found: {src}", file=sys.stderr)
         return 2
 
+    from kubernetes_sandbox import environment as envmod
     from kubernetes_sandbox.environment import KubernetesEnvironment
     from kubernetes_sandbox.kube import NotFound
     from kubernetes_sandbox.naming import Identity
@@ -52,6 +53,13 @@ def main(argv: list[str]) -> int:
     def check(label, ok, detail=""):
         results.append(bool(ok))
         print(("PASS " if ok else "FAIL ") + label + (f": {detail}" if detail else ""), flush=True)
+
+    def delete_pod_gracefully(which):
+        """Model a real out-of-band deletion (janitor, eviction): graceful, never a force delete,
+        which would let the next Pod mount the workspace while the old one still holds it."""
+        env._client.delete_pod(env._id.pod_name, grace_seconds=envmod._DELETE_GRACE)
+        gone = env._wait_gone(env._id.pod_name)
+        check(f"{which} Pod gone after a graceful delete", gone, "" if gone else "still terminating")
 
     try:
         t0 = time.time()
@@ -106,8 +114,7 @@ def main(argv: list[str]) -> int:
             time.sleep(0.5)
         check("timeout killed remote process", gone and control_ok and pid_ok,
               "" if gone else "still alive after ~3 s")
-        env._client.delete_pod(env._id.pod_name, grace_seconds=0)
-        env._wait_gone(env._id.pod_name)
+        delete_pod_gracefully("first")
         # timeout=10 is far shorter than a Kata cold start: the recreate must happen before the
         # command's bounded wait starts, never inside it (no synthetic 124).
         t0 = time.time()
@@ -124,8 +131,7 @@ def main(argv: list[str]) -> int:
         marker = secrets.token_hex(16)
         r = env.execute(f"printf %s {marker} > /workspace/e2e-persist.txt && sync")
         check("marker written to /workspace", r["returncode"] == 0, f"returncode={r['returncode']}")
-        env._client.delete_pod(env._id.pod_name, grace_seconds=0)
-        env._wait_gone(env._id.pod_name)
+        delete_pod_gracefully("second")
         r = env.execute("cat /workspace/e2e-persist.txt")
         check("workspace survives Pod deletion",
               r["returncode"] == 0 and r["output"].strip() == marker and r.get("environment_recreated") is True,
@@ -144,11 +150,7 @@ def main(argv: list[str]) -> int:
     except Exception as e:  # report, don't leak payloads
         check("unexpected error", False, type(e).__name__ + ": " + str(e)[:200])
     finally:
-        try:
-            env._client.delete_pod(env._id.pod_name, grace_seconds=0)
-        except Exception:
-            pass
-        env.cleanup()
+        env.cleanup()  # graceful, like every plugin-side delete
         delete_workspace(env)
     print(f"{sum(results)}/{len(results)} passed")
     return 0 if results and all(results) else 1
