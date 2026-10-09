@@ -13,13 +13,19 @@ server but has not been live-tested.
 - A `TerminalEnvironmentProvider` plugin; select it with `terminal.backend: kubernetes`.
 - One Pod per Hermes session: a `work` container running Hermes's sandbox image and, with
   `docker: true`, a `dind` sidecar from the official `docker:*-dind` image on a raw block volume
-  for `/var/lib/docker`. The Pod is created on the session's first command, adopted by a
-  restarted gateway, and recreated if it disappears — the result then carries
-  `environment_recreated` so the model is told the workspace was reset.
+  for `/var/lib/docker`. The Pod is created on the session's first command and recreated if it
+  disappears — the result then carries `environment_recreated` so the model is told that running
+  processes and Docker state are gone.
+- One **workspace volume** (PVC) per session, mounted at `/workspace`. It outlives the session's
+  Pods: every new Pod for the session mounts the same volume, so files under `/workspace` pick up
+  where the last Pod left off (see [Workspace persistence](#workspace-persistence)).
 - Commands run over the Kubernetes exec websocket through a fixed bash runner; Hermes's session
   snapshot, cwd tracking, timeouts and interrupts work as with the docker backend.
-- The Pod is deleted when Hermes ends the environment (session close, idle reaper). A gateway
-  that exits leaves its Pods for the next gateway to adopt; the janitor reaps what is left.
+- Pods come and go: the plugin deletes the session's Pod whenever Hermes ends the environment —
+  session close, Hermes's idle reaper, a graceful gateway stop or restart, eviction after an
+  infrastructure error — and the janitor reaps idle and expired ones. Only a gateway that dies
+  without shutting down (crash, SIGKILL) leaves its Pods running, for the next gateway to adopt or
+  the janitor to reap. The workspace volume survives all of these.
 - The plugin refuses to run a privileged Docker daemon without a VM-isolated RuntimeClass unless
   explicitly told to (`allow_privileged_host_runtime`).
 
@@ -42,9 +48,41 @@ Then set up the cluster side from one of the examples:
 - [`examples/runc-no-docker/`](examples/runc-no-docker/README.md) — the simplest deployment: an
   unprivileged Pod on the default runtime, no Docker, Pod Security `restricted`.
 
-Run the janitor (`examples/kata/janitor.yaml`) with either: it reaps Pods left behind by a
-crashed or stopped gateway, idle Pods, finished Pods and Pods past `max_lifetime_seconds` (the
-janitor is what enforces the `hermes-sandbox/max-lifetime-seconds` annotation the plugin writes).
+**The janitor (`examples/kata/janitor.yaml`) is required** with either example: it is the only
+thing that deletes workspace volumes (see below). It also reaps idle Pods, finished Pods, Pods
+left behind by a crashed gateway and Pods past `max_lifetime_seconds` (the janitor is what
+enforces the `hermes-sandbox/max-lifetime-seconds` annotation the plugin writes).
+
+## Workspace persistence
+
+Each session's `/workspace` is a PersistentVolumeClaim named `<pod name>-ws`, created by the plugin
+before the session's first Pod and labelled like it (`app.kubernetes.io/component: workspace`).
+Deleting the Pod — `cleanup()`, a gateway roll, eviction, the janitor's idle reap, a node drain —
+never deletes the volume, and the session's next Pod mounts it again.
+
+| Survives a new Pod | Does not survive |
+|---|---|
+| Files under `/workspace`, including the cwd | Running and background processes |
+| | Docker images, containers, volumes and build cache (the Docker disk is per Pod) |
+| | Anything outside `/workspace` (`/tmp`, `$HOME`, installed packages) |
+
+The result of the first command in a new Pod carries `environment_recreated`, as before: the
+workspace is intact but processes and Docker state are not.
+
+**Retention.** The plugin stamps `workspace_retention` (default `7d`) on each PVC as
+`hermes-sandbox/workspace-retention-seconds`. The janitor, every run, stamps a PVC that no Pod
+mounts with `hermes-sandbox/unused-since` (its own clock, accurate to one run), removes the stamp
+when a Pod mounts it again, and deletes the PVC (uid precondition) once `unused-since` is older than
+the retention. Malformed annotations restart the clock; they never delete a volume. A session that
+returns after its workspace was deleted gets a fresh, empty one. The plugin never deletes a PVC and
+its RBAC has no `delete` on them.
+
+**Storage class.** Any `ReadWriteOnce` filesystem StorageClass; `workspace_storage_class` unset uses
+the cluster default. `workspace_size` is the PVC's request; changing it affects new workspaces only
+(existing PVCs keep their size). Budget the namespace quota for idle workspaces as well as live
+sessions (the example quotas show the arithmetic). Under Kata, the volume is mounted on the host
+and shared into the VM over virtio-fs (see Known limits). Workspaces are not backed up by this
+plugin; back up the StorageClass's volumes if you need that.
 
 ### Out-of-cluster gateways
 
@@ -82,7 +120,9 @@ for a nullable key means "unset".
 | `formatter_image` | `debian:bookworm-slim` | Init container that formats the Docker block volume. |
 | `docker_disk_storage_class` | unset (required with `docker: true`) | StorageClass providing `volumeMode: Block` volumes. |
 | `docker_disk_size` | `30Gi` | Size of the per-Pod Docker disk. |
-| `workspace_size` | `10Gi` | `sizeLimit` of the `/workspace` emptyDir. |
+| `workspace_size` | `10Gi` | Storage request of the session's `/workspace` PVC (new workspaces only). |
+| `workspace_storage_class` | unset (cluster default) | StorageClass of the workspace PVC: a `ReadWriteOnce` filesystem class. Env: `HERMES_K8S_WORKSPACE_STORAGE_CLASS`. |
+| `workspace_retention` | `7d` | How long a workspace may sit unmounted before the janitor deletes it: seconds, or `<n>s`/`m`/`h`/`d` (`36h`, `7d`); must be positive. Written to each new PVC. Env: `HERMES_K8S_WORKSPACE_RETENTION`. |
 | `work_cpu` / `work_memory` | `100m` / `512Mi` | `work` CPU request; memory request and limit. |
 | `dind_cpu_request` / `dind_cpu_limit` / `dind_memory` | `500m` / `2` / `1Gi` | `dind` resources. |
 | `profile_configmap` | `hermes-sandbox-profile` | ConfigMap mounted into `/etc/profile.d` (puts the Docker CLI on PATH). |
@@ -95,7 +135,8 @@ for a nullable key means "unset".
 | `extra_pod_annotations` | `{}` | Extra Pod annotations, string to string. From the environment: JSON or YAML text. |
 
 Changing a setting that affects the Pod template replaces existing sandbox Pods on their next
-command (template-hash label), with the `environment_recreated` notice.
+command (template-hash label), with the `environment_recreated` notice; the workspace volume is
+kept.
 
 ## Development and validation
 
@@ -121,10 +162,19 @@ command (template-hash label), with the `environment_recreated` notice.
   the exec's stdin, spools the stdin to a private file in the Pod's `/tmp` before starting the
   command, and runs the command from that file: the command still sees EOF, and a command that
   never reads its stdin cannot stall the upload.
-- The workspace is an emptyDir: it lives and dies with the Pod. When Hermes ends the environment
-  (session close, idle reaper, or eviction after an infrastructure error) the Pod is deleted, and
-  the next command starts in a fresh Pod with the `environment_recreated` notice.
+- Only `/workspace` persists across Pods; processes, Docker state and the rest of the filesystem
+  do not (see Workspace persistence).
+- Under Kata the workspace PVC is a host filesystem shared into the VM over virtio-fs, so its writes
+  go through the host page cache. The live gate measures its memory cost under heavy writes; the
+  soak numbers in the Kata example predate it.
+- A workspace PVC with a matching name but foreign labels or session key is never mounted: the
+  command fails with a non-retryable error until an operator removes that PVC.
+- If the janitor deletes an expired workspace at the moment a returning session starts a Pod (its
+  Pod list is a few seconds old), the new Pod may get a fresh, empty workspace; a Pod left Pending on
+  the deleted claim is healed by the plugin re-creating the claim on the next command.
 - Scripts are limited to 128 KiB (same as the docker backend).
+- The runner's `exec_id` (used to find and kill a command) is not validated in the Pod: it is an
+  internal uuid, never user input.
 - The Pod's PID 1 is `sleep`, which does not reap zombies.
 - Processes that leave the command's process group (`setsid`, double-forking daemons) escape a
   kill; the Pod is the boundary.
