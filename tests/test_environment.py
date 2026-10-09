@@ -519,3 +519,16 @@ def test_recreate_falls_back_to_initial_cwd_when_mkdir_fails():
     e.ensure_pod()
     assert len(_mkdir_runs(inner, "/read-only/sub")) == 1
     assert e.cwd == "/workspace"
+
+
+def test_capacity_ignores_finished_and_terminating_pods():
+    kube = FakeKube(ready_after=0)
+    s = Settings(runtime_class_name="kata", docker_disk_storage_class="b", max_per_profile=1)
+    kube.create_pod(render_pod(s, Identity("mars", "done"), now_iso="x", created_by="x"))
+    kube.create_pod(render_pod(s, Identity("mars", "dying"), now_iso="x", created_by="x"))
+    kube.pods[Identity("mars", "done").pod_name]["status"] = {"phase": "Succeeded"}
+    kube.pods[Identity("mars", "dying").pod_name]["metadata"]["deletionTimestamp"] = "2026-01-01T00:00:00Z"
+    e, _, _ = _env(kube=kube, settings=s)
+    kube._gets[Identity("mars", "done").pod_name] = -100
+    e.ensure_pod()
+    assert e._pod_ready

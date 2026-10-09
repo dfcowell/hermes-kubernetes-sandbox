@@ -84,3 +84,10 @@ def test_exec_url_encodes_argv(settings):
     url = _client(settings, lambda r: httpx.Response(200)).exec_url("p", "work", ["bash", "-c", "a b&c"])
     assert url.startswith("wss://api.example:6443/api/v1/namespaces/agent-sandbox/pods/p/exec?")
     assert "container=work" in url and "command=bash" in url and "command=a+b%26c" in url
+
+
+def test_non_string_error_message_is_stringified(settings):
+    from kubernetes_sandbox.kube import KubeError
+    with pytest.raises(KubeError) as ei:
+        _client(settings, lambda r: httpx.Response(500, json={"reason": "X", "message": {"nested": 1}})).get_pod("p")
+    assert "nested" in str(ei.value)

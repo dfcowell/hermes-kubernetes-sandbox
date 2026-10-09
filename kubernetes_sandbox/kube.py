@@ -36,6 +36,8 @@ class KubeClient:
         self._http = httpx.Client(transport=transport, verify=self.ssl_context(), timeout=30.0)
 
     def ssl_context(self) -> ssl.SSLContext | bool:
+        # A configured but missing ca_path falls back to system trust; the provider's
+        # check_requirements()/probe() report it (ca_problem()).
         if self._s.ca_path and pathlib.Path(self._s.ca_path).exists():
             return ssl.create_default_context(cafile=self._s.ca_path)
         return True
@@ -60,7 +62,7 @@ class KubeClient:
             body = {}
         if not isinstance(body, dict):
             body = {}
-        reason, message = body.get("reason", ""), body.get("message", r.text[:300])
+        reason, message = str(body.get("reason", "")), str(body.get("message", r.text[:300]))
         if r.status_code == 404:
             raise NotFound(404, reason, message)
         if r.status_code == 409:

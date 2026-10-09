@@ -299,3 +299,11 @@ def test_main_delete_body_has_uid_precondition():
     assert "pod-to-delete" in path
     assert body == {"gracePeriodSeconds": 10, "preconditions": {"uid": "uid-123"}}
     assert exit_code == 0
+
+
+def test_janitor_imports_urllib_error_itself():
+    import ast
+    import pathlib
+    tree = ast.parse(pathlib.Path(janitor.__file__).read_text())
+    imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+    assert "urllib.error" in imported

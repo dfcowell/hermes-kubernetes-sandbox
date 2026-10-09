@@ -42,12 +42,17 @@ def encode_frame(channel: int, data: bytes) -> bytes:
 
 
 def parse_status(payload: bytes) -> int:
-    st = json.loads(payload.decode("utf-8", "replace") or "{}")
-    if st.get("status") == "Success":
-        return 0
-    for cause in (st.get("details") or {}).get("causes") or []:
-        if cause.get("reason") == "ExitCode":
-            return int(cause.get("message", "1"))
+    try:
+        st = json.loads(payload.decode("utf-8", "replace") or "{}")
+        if not isinstance(st, dict):
+            raise ValueError("status is not an object")
+        if st.get("status") == "Success":
+            return 0
+        for cause in (st.get("details") or {}).get("causes") or []:
+            if cause.get("reason") == "ExitCode":
+                return int(cause.get("message", "1"))
+    except (ValueError, TypeError, AttributeError) as e:  # JSONDecodeError is a ValueError
+        raise ExecFailed(f"malformed exec status: {e}") from None
     raise ExecFailed(st.get("message") or "exec failed")
 
 
@@ -73,8 +78,10 @@ class StreamingExecHandle:
         return self._returncode
 
     def _write(self, data: bytes) -> None:
+        view = memoryview(data)
         try:
-            os.write(self._w, data)
+            while view:
+                view = view[os.write(self._w, view):]
         except OSError:
             pass
 

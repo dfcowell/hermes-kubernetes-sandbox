@@ -78,6 +78,12 @@ def _ready(pod: dict) -> bool:
         c.get("type") == "Ready" and c.get("status") == "True" for c in st.get("conditions") or [])
 
 
+def _live(pod: dict) -> bool:
+    """Not finished and not terminating: counts against capacity, can be adopted."""
+    return ((pod.get("status") or {}).get("phase") not in ("Failed", "Succeeded")
+            and not (pod.get("metadata") or {}).get("deletionTimestamp"))
+
+
 def _uid(pod: dict) -> str | None:
     return (pod.get("metadata") or {}).get("uid")
 
@@ -122,8 +128,7 @@ class KubernetesEnvironment(BaseEnvironment):
         md = pod.get("metadata") or {}
         return ((md.get("annotations") or {}).get(ANN_SESSION_KEY) == self._id.session_key
                 and (md.get("labels") or {}).get(LBL_TEMPLATE_HASH) == template_hash(self._s)
-                and (pod.get("status") or {}).get("phase") not in ("Failed", "Succeeded")
-                and not md.get("deletionTimestamp"))
+                and _live(pod))
 
     def _wait_gone(self, name: str) -> None:
         deadline = self._clock() + 60
@@ -137,7 +142,7 @@ class KubernetesEnvironment(BaseEnvironment):
     def _check_capacity(self) -> None:
         sel = ",".join(f"{k}={v}" for k, v in MANAGED_BY.items()) + f",{LBL_PROFILE}={slug(self._id.profile, 63)}"
         live = [p["metadata"]["name"] for p in self._client.list_pods(sel)
-                if p["metadata"]["name"] != self._id.pod_name]
+                if p["metadata"]["name"] != self._id.pod_name and _live(p)]
         if len(live) >= self._s.max_per_profile:
             raise EnvironmentConnectionError(
                 f"Sandbox limit reached for profile {self._id.profile!r}: {len(live)} live sandboxes "

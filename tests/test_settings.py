@@ -49,3 +49,53 @@ def test_interlock_allows_explicit_override_or_runtime_class_or_no_docker():
     assert interlock_error(Settings(docker=True, docker_disk_storage_class="x",
                                     runtime_class_name="kata")) is None
     assert interlock_error(Settings(docker=False)) is None
+
+
+@pytest.mark.parametrize("text", ["- a\n- b\n", "just a string\n", "42\n"])
+def test_non_mapping_yaml_is_a_settings_error(_isolated_hermes_home, text):
+    (_isolated_hermes_home / "kubernetes-sandbox.yaml").write_text(text)
+    with pytest.raises(SettingsError, match="must be a mapping"):
+        load_settings(_isolated_hermes_home)
+
+
+def test_invalid_yaml_is_a_settings_error(_isolated_hermes_home):
+    (_isolated_hermes_home / "kubernetes-sandbox.yaml").write_text("docker: [false\n")
+    with pytest.raises(SettingsError, match="kubernetes-sandbox.yaml"):
+        load_settings(_isolated_hermes_home)
+
+
+def test_extra_pod_annotations_from_env(_isolated_hermes_home, monkeypatch):
+    monkeypatch.setenv("HERMES_K8S_DOCKER", "false")
+    monkeypatch.setenv("HERMES_K8S_EXTRA_POD_ANNOTATIONS", '{"io.katacontainers.config.hypervisor.default_vcpus": "2"}')
+    s = load_settings(_isolated_hermes_home)
+    assert s.extra_pod_annotations == {"io.katacontainers.config.hypervisor.default_vcpus": "2"}
+    monkeypatch.setenv("HERMES_K8S_EXTRA_POD_ANNOTATIONS", "a: b\n")
+    assert load_settings(_isolated_hermes_home).extra_pod_annotations == {"a": "b"}
+
+
+@pytest.mark.parametrize("raw", ["[1, 2]", "{a: 1}", "{a: [x]}", "{a: b", "plain"])
+def test_extra_pod_annotations_must_be_a_string_mapping(_isolated_hermes_home, monkeypatch, raw):
+    monkeypatch.setenv("HERMES_K8S_DOCKER", "false")
+    monkeypatch.setenv("HERMES_K8S_EXTRA_POD_ANNOTATIONS", raw)
+    with pytest.raises(SettingsError, match="extra_pod_annotations"):
+        load_settings(_isolated_hermes_home)
+
+
+def test_extra_pod_annotations_yaml_values_checked(_isolated_hermes_home):
+    (_isolated_hermes_home / "kubernetes-sandbox.yaml").write_text("docker: false\nextra_pod_annotations: {a: 1}\n")
+    with pytest.raises(SettingsError, match="extra_pod_annotations"):
+        load_settings(_isolated_hermes_home)
+
+
+@pytest.mark.parametrize("raw,val", [("1", True), ("TRUE", True), ("on", True), ("0", False), ("no", False),
+                                     ("Off", False), ("false", False)])
+def test_bool_env_values(_isolated_hermes_home, monkeypatch, raw, val):
+    monkeypatch.setenv("HERMES_K8S_DOCKER", raw)
+    monkeypatch.setenv("HERMES_K8S_DOCKER_DISK_STORAGE_CLASS", "b")
+    assert load_settings(_isolated_hermes_home).docker is val
+
+
+def test_unrecognised_bool_env_value_raises(_isolated_hermes_home, monkeypatch):
+    monkeypatch.setenv("HERMES_K8S_DOCKER", "flase")
+    with pytest.raises(SettingsError, match="docker"):
+        load_settings(_isolated_hermes_home)

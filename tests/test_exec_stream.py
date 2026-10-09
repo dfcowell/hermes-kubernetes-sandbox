@@ -80,7 +80,7 @@ def test_kill_calls_on_kill_and_closes():
     conn = FakeConn([], end_with=None)  # never ends on its own
     h = StreamingExecHandle(lambda: conn, b"", on_kill=killed.set)
     h.kill()
-    assert killed.is_set()
+    assert killed.wait(2)  # on_kill runs on its own thread
     assert h.wait(timeout=5) is not None and conn.closed
 
 
@@ -147,3 +147,27 @@ def test_kill_mid_send_stops_sending():
     assert h.wait(timeout=2) == 137
     assert len(conn.sent) < 10 and conn.closed
     assert h.error is None
+
+
+@pytest.mark.parametrize("raw", [b"not json", b"[1, 2]", b'{"status": "Failure", "details": {"causes": '
+                                 b'[{"reason": "ExitCode", "message": "x"}]}}', b"\xff\xfe"])
+def test_parse_status_malformed_is_exec_failed(raw):
+    with pytest.raises(ExecFailed):
+        parse_status(raw)
+
+
+def test_write_loops_on_partial_writes(monkeypatch):
+    import os as _os
+    from kubernetes_sandbox import exec_stream
+    calls = []
+    real = _os.write
+
+    def short_write(fd, data):
+        calls.append(len(data))
+        return real(fd, bytes(data[:3]))
+
+    conn = FakeConn([encode_frame(STDOUT, b"0123456789"), _status(0)], end_with=ConnectionError())
+    monkeypatch.setattr(exec_stream.os, "write", short_write)
+    h = StreamingExecHandle(lambda: conn, b"", on_kill=lambda: None)
+    assert h.wait(timeout=5) == 0
+    assert h.stdout.read() == "0123456789" and len(calls) == 4

@@ -25,6 +25,13 @@ def _profile(home: pathlib.Path) -> str:
         return "default"
 
 
+def _ca_problem(s) -> str | None:
+    if s.ca_path and not pathlib.Path(s.ca_path).exists():
+        return (f"ca_path {s.ca_path} does not exist (the API server would be verified against the "
+                "system trust store instead); fix it, or set ca_path to an empty value to use system trust")
+    return None
+
+
 class KubernetesProvider(TerminalEnvironmentProvider):
     name = "kubernetes"
     display_name = "Kubernetes"
@@ -38,7 +45,7 @@ class KubernetesProvider(TerminalEnvironmentProvider):
 
     @property
     def skip_container_guards(self) -> bool:
-        # v1 forwards no credentials into the Pod, so approvals stay on (design K12).
+        # Approvals stay on until the K11/K12 conditional skip lands.
         return False
 
     @property
@@ -49,9 +56,7 @@ class KubernetesProvider(TerminalEnvironmentProvider):
         return load_settings(_home())
 
     def is_available(self) -> bool:
-        try:
-            if not (_home() / "kubernetes-sandbox.yaml").exists():
-                return False
+        try:  # env-only configuration (HERMES_K8S_*) is valid: the YAML file is optional
             s = self._settings()
             return pathlib.Path(s.token_path).exists()
         except Exception:
@@ -70,6 +75,10 @@ class KubernetesProvider(TerminalEnvironmentProvider):
         if not pathlib.Path(s.token_path).exists():
             log.error("kubernetes sandbox: no API token at %s", s.token_path)
             return False
+        ca = _ca_problem(s)
+        if ca:
+            log.error("kubernetes sandbox: %s", ca)
+            return False
         return True
 
     def probe(self):
@@ -80,6 +89,9 @@ class KubernetesProvider(TerminalEnvironmentProvider):
         msg = interlock_error(s)
         if msg:
             return ("needs_setup", msg)
+        ca = _ca_problem(s)
+        if ca:
+            return ("needs_setup", ca)
         return ("ready", f"namespace {s.namespace}") if self.is_available() else (
             "needs_setup", f"no API token at {s.token_path}")
 
@@ -90,9 +102,6 @@ class KubernetesProvider(TerminalEnvironmentProvider):
     def create_environment(self, *, cwd, timeout, task_id="default", image=None, container_config=None, **kwargs):
         from .environment import KubernetesEnvironment
         home = _home()
-        s = self._settings()
-        if image:
-            import dataclasses
-            s = dataclasses.replace(s, work_image=image)
+        s = self._settings()  # `image` (Hermes's per-backend image) is ignored: work_image is the setting
         return KubernetesEnvironment(settings=s, identity=Identity(_profile(home), task_id or "default"),
                                      cwd=cwd or "/workspace", timeout=timeout)

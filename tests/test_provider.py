@@ -12,13 +12,41 @@ def test_attributes():
     assert p.session_isolated_when_nonpersistent is True
 
 
-def test_is_available_needs_settings_and_token_without_network(_isolated_hermes_home, tmp_path):
+def test_is_available_needs_valid_settings_and_token_without_network(_isolated_hermes_home, tmp_path):
     p = KubernetesProvider()
-    assert p.is_available() is False  # no settings file
+    assert p.is_available() is False  # defaults: docker needs a StorageClass, no token
     tok = tmp_path / "tok"
     tok.write_text("x")
     _write(_isolated_hermes_home, f"docker: false\ntoken_path: {tok}\n")
     assert p.is_available() is True
+
+
+def test_env_only_configuration_is_available(_isolated_hermes_home, tmp_path, monkeypatch):
+    tok = tmp_path / "tok"
+    tok.write_text("x")
+    monkeypatch.setenv("HERMES_K8S_DOCKER", "false")
+    monkeypatch.setenv("HERMES_K8S_TOKEN_PATH", str(tok))
+    assert not (_isolated_hermes_home / "kubernetes-sandbox.yaml").exists()
+    assert KubernetesProvider().is_available() is True
+
+
+def test_missing_ca_file_is_reported(_isolated_hermes_home, tmp_path, caplog):
+    tok = tmp_path / "tok"
+    tok.write_text("x")
+    _write(_isolated_hermes_home, f"docker: false\ntoken_path: {tok}\nca_path: {tmp_path}/nope.crt\n")
+    p = KubernetesProvider()
+    assert p.check_requirements({}) is False
+    assert "nope.crt" in caplog.text
+    status, detail = p.probe()
+    assert status == "needs_setup" and "nope.crt" in detail
+
+
+def test_create_environment_ignores_image_override(_isolated_hermes_home, tmp_path):
+    tok = tmp_path / "tok"
+    tok.write_text("x")
+    _write(_isolated_hermes_home, f"docker: false\ntoken_path: {tok}\nwork_image: mine:1\n")
+    env = KubernetesProvider().create_environment(cwd="/workspace", timeout=60, task_id="t", image="other:2")
+    assert env._s.work_image == "mine:1"
 
 
 def test_check_requirements_reports_interlock(_isolated_hermes_home, tmp_path, caplog):

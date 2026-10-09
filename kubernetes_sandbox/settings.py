@@ -51,13 +51,33 @@ class Settings:
 
 _FIELDS = {f.name: f for f in dataclasses.fields(Settings)}
 _TRUE = {"1", "true", "yes", "on"}
+_FALSE = {"0", "false", "no", "off"}
+
+
+def _annotations(raw) -> dict[str, str]:
+    if isinstance(raw, str):  # HERMES_K8S_EXTRA_POD_ANNOTATIONS: JSON or YAML text
+        try:
+            raw = yaml.safe_load(raw)
+        except yaml.YAMLError as e:
+            raise SettingsError(f"extra_pod_annotations is not valid JSON/YAML: {e}") from None
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in raw.items()):
+        raise SettingsError("extra_pod_annotations must be a mapping of string keys to string values "
+                            "(quote numbers and booleans)")
+    return raw
 
 
 def _coerce(name: str, raw):
     ftype = _FIELDS[name].type
+    if name == "extra_pod_annotations":
+        return _annotations(raw)
     if isinstance(raw, str):
         if ftype == "bool":
-            return raw.strip().lower() in _TRUE
+            v = raw.strip().lower()
+            if v in _TRUE or v in _FALSE:
+                return v in _TRUE
+            raise SettingsError(f"{name} must be a boolean (1/0, true/false, yes/no, on/off), got {raw!r}")
         if ftype == "int":
             try:
                 return int(raw)
@@ -84,7 +104,14 @@ def load_settings(home: pathlib.Path) -> Settings:
     values: dict = {}
     path = pathlib.Path(home) / "kubernetes-sandbox.yaml"
     if path.exists():
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except yaml.YAMLError as e:
+            raise SettingsError(f"{path} is not valid YAML: {e}") from None
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            raise SettingsError(f"{path} must be a mapping of setting: value, got {type(data).__name__}")
         unknown = sorted(set(data) - set(_FIELDS))
         if unknown:
             raise SettingsError(f"unknown setting(s) in {path}: {', '.join(unknown)}")
