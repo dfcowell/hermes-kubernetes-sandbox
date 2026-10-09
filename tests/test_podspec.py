@@ -87,3 +87,38 @@ def test_template_hash_covers_extra_pod_annotations():
     other = Settings(runtime_class_name="kata", docker_disk_storage_class="block-ephemeral",
                      extra_pod_annotations={"a": "b"})
     assert template_hash(KATA) != template_hash(other)
+
+
+def _all_containers(pod):
+    return pod["spec"]["containers"] + pod["spec"].get("initContainers", [])
+
+
+def test_docker_false_pod_satisfies_restricted_pss():
+    pod = _pod(Settings(docker=False))
+    spec = pod["spec"]
+    for key in ("hostNetwork", "hostPID", "hostIPC"):
+        assert not spec.get(key)
+    assert all("hostPath" not in v for v in spec["volumes"])
+    for c in _all_containers(pod):
+        sc = c["securityContext"]
+        assert sc["runAsNonRoot"] is True
+        assert sc["seccompProfile"] == {"type": "RuntimeDefault"}
+        assert sc["capabilities"]["drop"] == ["ALL"]
+        assert sc["allowPrivilegeEscalation"] is False
+        assert not sc.get("privileged")
+        assert all("hostPort" not in p for p in c.get("ports", []))
+
+
+def test_docker_true_hardens_work_and_cli_but_not_root_containers():
+    for mode in ("image-volume", "init-copy"):
+        pod = _pod(Settings(runtime_class_name="kata", docker_disk_storage_class="b", docker_cli=mode))
+        by = {c["name"]: c for c in _all_containers(pod)}
+        hardened = ["work"] + (["docker-cli"] if mode == "init-copy" else [])
+        for name in hardened:
+            sc = by[name]["securityContext"]
+            assert sc["runAsNonRoot"] is True and sc["seccompProfile"] == {"type": "RuntimeDefault"}, name
+        for name in ("dind", "format"):
+            sc = by[name].get("securityContext", {})
+            assert "runAsNonRoot" not in sc and "seccompProfile" not in sc, name
+        assert "runAsNonRoot" not in pod["spec"]["securityContext"]
+        assert "seccompProfile" not in pod["spec"]["securityContext"]

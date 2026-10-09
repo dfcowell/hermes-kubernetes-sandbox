@@ -9,8 +9,9 @@ from .naming import (ANN_CREATED_BY, ANN_LAST_USED, ANN_MAX_LIFETIME, ANN_SESSIO
                      LBL_PROFILE, LBL_TEMPLATE_HASH, MANAGED_BY, Identity, slug)
 from .settings import Settings
 
-_WORK_SC = {"runAsUser": 1000, "runAsGroup": 1000, "allowPrivilegeEscalation": False,
-            "capabilities": {"drop": ["ALL"]}}
+# Restricted-PSA compliant. Applied per container, not pod-wide: dind and the formatter run as root.
+_WORK_SC = {"runAsUser": 1000, "runAsGroup": 1000, "runAsNonRoot": True, "allowPrivilegeEscalation": False,
+            "capabilities": {"drop": ["ALL"]}, "seccompProfile": {"type": "RuntimeDefault"}}
 DOCKER_GID = 2375
 _CLI_DIR = "/opt/docker-cli"
 
