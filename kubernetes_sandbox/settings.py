@@ -4,6 +4,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import pathlib
+import re
 
 import yaml
 
@@ -34,6 +35,8 @@ class Settings:
     docker_disk_storage_class: str | None = None
     docker_disk_size: str = "30Gi"
     workspace_size: str = "10Gi"
+    workspace_storage_class: str | None = None
+    workspace_retention_seconds: int = 604800
     work_cpu: str = "100m"
     work_memory: str = "512Mi"
     dind_cpu_request: str = "500m"
@@ -50,6 +53,11 @@ class Settings:
 
 
 _FIELDS = {f.name: f for f in dataclasses.fields(Settings)}
+# Settings whose YAML key (and HERMES_K8S_<KEY> variable) differs from the field name.
+_KEY_TO_FIELD = {"workspace_retention": "workspace_retention_seconds"}
+_KEYS = {**{k: k for k in _FIELDS if k not in _KEY_TO_FIELD.values()}, **_KEY_TO_FIELD}
+_DURATION = re.compile(r"^(\d+)([smhd]?)$")
+_UNIT = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
 
@@ -68,10 +76,23 @@ def _annotations(raw) -> dict[str, str]:
     return raw
 
 
+def _duration(key: str, raw) -> int:
+    """Seconds, from an int or `<n>s|m|h|d` ("7d"); bare digits are seconds."""
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return raw
+    m = _DURATION.match(raw.strip()) if isinstance(raw, str) else None
+    if not m:
+        raise SettingsError(f"{key} must be a whole number of seconds or a duration like 90s, 15m, 36h, 7d; "
+                            f"got {raw!r}")
+    return int(m.group(1)) * _UNIT[m.group(2)]
+
+
 def _coerce(name: str, raw):
     ftype = _FIELDS[name].type
     if name == "extra_pod_annotations":
         return _annotations(raw)
+    if name == "workspace_retention_seconds":
+        return _duration("workspace_retention", raw)
     if isinstance(raw, str):
         if ftype == "bool":
             v = raw.strip().lower()
@@ -97,6 +118,8 @@ def validate(s: Settings) -> Settings:
     for name in ("max_per_profile", "ready_timeout_seconds", "max_lifetime_seconds"):
         if getattr(s, name) <= 0:
             raise SettingsError(f"{name} must be positive")
+    if s.workspace_retention_seconds <= 0:
+        raise SettingsError("workspace_retention must be positive")
     return s
 
 
@@ -112,12 +135,12 @@ def load_settings(home: pathlib.Path) -> Settings:
             data = {}
         if not isinstance(data, dict):
             raise SettingsError(f"{path} must be a mapping of setting: value, got {type(data).__name__}")
-        unknown = sorted(set(data) - set(_FIELDS))
+        unknown = sorted(set(data) - set(_KEYS))
         if unknown:
             raise SettingsError(f"unknown setting(s) in {path}: {', '.join(unknown)}")
-        values.update(data)
-    for name in _FIELDS:
-        env = os.environ.get(f"HERMES_K8S_{name.upper()}")
+        values.update({_KEYS[k]: v for k, v in data.items()})
+    for key, name in _KEYS.items():
+        env = os.environ.get(f"HERMES_K8S_{key.upper()}")
         if env is not None:
             values[name] = env
     values = {k: _coerce(k, v) for k, v in values.items()}

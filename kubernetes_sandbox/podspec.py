@@ -5,8 +5,8 @@ import copy
 import hashlib
 import json
 
-from .naming import (ANN_CREATED_BY, ANN_LAST_USED, ANN_MAX_LIFETIME, ANN_SESSION_KEY, LBL_KEY_HASH,
-                     LBL_PROFILE, LBL_TEMPLATE_HASH, MANAGED_BY, Identity, slug)
+from .naming import (ANN_CREATED_BY, ANN_LAST_USED, ANN_MAX_LIFETIME, ANN_SESSION_KEY, ANN_WS_RETENTION,
+                     LBL_COMPONENT, LBL_KEY_HASH, LBL_PROFILE, LBL_TEMPLATE_HASH, MANAGED_BY, Identity, slug)
 from .settings import Settings
 
 # Restricted-PSA compliant. Applied per container, not pod-wide: dind and the formatter run as root.
@@ -16,7 +16,7 @@ DOCKER_GID = 2375
 _CLI_DIR = "/opt/docker-cli"
 
 
-def _spec(s: Settings) -> dict:
+def _spec(s: Settings, claim: str) -> dict:
     work = {
         "name": "work", "image": s.work_image, "command": ["sleep", "infinity"],
         "securityContext": copy.deepcopy(_WORK_SC),
@@ -27,9 +27,10 @@ def _spec(s: Settings) -> dict:
     }
     spec: dict = {
         "automountServiceAccountToken": False, "restartPolicy": "Never", "enableServiceLinks": False,
-        "securityContext": {"fsGroup": 1000},
+        # OnRootMismatch: chown the workspace once, not on every remount of a grown volume.
+        "securityContext": {"fsGroup": 1000, "fsGroupChangePolicy": "OnRootMismatch"},
         "containers": [work],
-        "volumes": [{"name": "workspace", "emptyDir": {"sizeLimit": s.workspace_size}}],
+        "volumes": [{"name": "workspace", "persistentVolumeClaim": {"claimName": claim}}],
     }
     if s.runtime_class_name:
         spec["runtimeClassName"] = s.runtime_class_name
@@ -97,16 +98,37 @@ def _spec(s: Settings) -> dict:
     return spec
 
 
+# The claim name is per session; hash the template with a fixed placeholder so every session shares it.
+_HASH_CLAIM = "<workspace-claim>"
+
+
 def template_hash(s: Settings) -> str:
-    return hashlib.sha256(json.dumps({"spec": _spec(s), "annotations": s.extra_pod_annotations}, sort_keys=True).encode()).hexdigest()[:8]
+    return hashlib.sha256(json.dumps({"spec": _spec(s, _HASH_CLAIM), "annotations": s.extra_pod_annotations},
+                                     sort_keys=True).encode()).hexdigest()[:8]
+
+
+def identity_labels(ident: Identity) -> dict:
+    return {**MANAGED_BY, LBL_PROFILE: slug(ident.profile, 63), LBL_KEY_HASH: ident.key_hash}
 
 
 def render_pod(s: Settings, ident: Identity, *, now_iso: str, created_by: str) -> dict:
-    labels = {**MANAGED_BY, LBL_PROFILE: slug(ident.profile, 63), LBL_KEY_HASH: ident.key_hash,
-              LBL_TEMPLATE_HASH: template_hash(s)}
+    labels = {**identity_labels(ident), LBL_COMPONENT: "sandbox", LBL_TEMPLATE_HASH: template_hash(s)}
     annotations = {**s.extra_pod_annotations, ANN_SESSION_KEY: ident.session_key, ANN_LAST_USED: now_iso,
                    ANN_MAX_LIFETIME: str(s.max_lifetime_seconds), ANN_CREATED_BY: created_by}
     return {"apiVersion": "v1", "kind": "Pod",
             "metadata": {"name": ident.pod_name, "namespace": s.namespace,
                          "labels": labels, "annotations": annotations},
-            "spec": _spec(s)}
+            "spec": _spec(s, ident.workspace_claim)}
+
+
+def render_workspace_claim(s: Settings, ident: Identity) -> dict:
+    """The session's /workspace volume. No template hash: it must survive template changes."""
+    spec: dict = {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": s.workspace_size}}}
+    if s.workspace_storage_class:
+        spec["storageClassName"] = s.workspace_storage_class
+    return {"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+            "metadata": {"name": ident.workspace_claim, "namespace": s.namespace,
+                         "labels": {**identity_labels(ident), LBL_COMPONENT: "workspace"},
+                         "annotations": {ANN_SESSION_KEY: ident.session_key,
+                                         ANN_WS_RETENTION: str(s.workspace_retention_seconds)}},
+            "spec": spec}

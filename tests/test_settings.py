@@ -99,3 +99,57 @@ def test_unrecognised_bool_env_value_raises(_isolated_hermes_home, monkeypatch):
     monkeypatch.setenv("HERMES_K8S_DOCKER", "flase")
     with pytest.raises(SettingsError, match="docker"):
         load_settings(_isolated_hermes_home)
+
+
+@pytest.mark.parametrize("yaml_value,seconds", [("604800", 604800), ("90", 90), ("7d", 604800), ("36h", 129600),
+                                               ("15m", 900), ("45s", 45), ("'7d'", 604800)])
+def test_workspace_retention_yaml(_isolated_hermes_home, yaml_value, seconds):
+    (_isolated_hermes_home / "kubernetes-sandbox.yaml").write_text(
+        f"docker: false\nworkspace_retention: {yaml_value}\n")
+    assert load_settings(_isolated_hermes_home).workspace_retention_seconds == seconds
+
+
+def test_workspace_retention_default_is_seven_days(_isolated_hermes_home, monkeypatch):
+    monkeypatch.setenv("HERMES_K8S_DOCKER", "false")
+    assert load_settings(_isolated_hermes_home).workspace_retention_seconds == 604800
+    assert Settings().workspace_retention_seconds == 604800
+
+
+@pytest.mark.parametrize("raw,seconds", [("36h", 129600), ("2d", 172800), ("3600", 3600)])
+def test_workspace_retention_env_override(_isolated_hermes_home, monkeypatch, raw, seconds):
+    (_isolated_hermes_home / "kubernetes-sandbox.yaml").write_text("docker: false\nworkspace_retention: 7d\n")
+    monkeypatch.setenv("HERMES_K8S_WORKSPACE_RETENTION", raw)
+    assert load_settings(_isolated_hermes_home).workspace_retention_seconds == seconds
+
+
+@pytest.mark.parametrize("yaml_value", ["0", "0d", "-5", "7w", "abc", "true", "1.5h", "''", "[7]"])
+def test_workspace_retention_invalid(_isolated_hermes_home, yaml_value):
+    (_isolated_hermes_home / "kubernetes-sandbox.yaml").write_text(
+        f"docker: false\nworkspace_retention: {yaml_value}\n")
+    with pytest.raises(SettingsError, match="workspace_retention"):
+        load_settings(_isolated_hermes_home)
+
+
+def test_workspace_retention_invalid_env(_isolated_hermes_home, monkeypatch):
+    monkeypatch.setenv("HERMES_K8S_DOCKER", "false")
+    monkeypatch.setenv("HERMES_K8S_WORKSPACE_RETENTION", "soon")
+    with pytest.raises(SettingsError, match="workspace_retention"):
+        load_settings(_isolated_hermes_home)
+
+
+def test_workspace_retention_seconds_is_not_a_yaml_key(_isolated_hermes_home):
+    (_isolated_hermes_home / "kubernetes-sandbox.yaml").write_text(
+        "docker: false\nworkspace_retention_seconds: 60\n")
+    with pytest.raises(SettingsError, match="unknown setting"):
+        load_settings(_isolated_hermes_home)
+
+
+def test_workspace_storage_class_yaml_env_and_empty(_isolated_hermes_home, monkeypatch):
+    (_isolated_hermes_home / "kubernetes-sandbox.yaml").write_text(
+        "docker: false\nworkspace_storage_class: fast-fs\n")
+    assert load_settings(_isolated_hermes_home).workspace_storage_class == "fast-fs"
+    monkeypatch.setenv("HERMES_K8S_WORKSPACE_STORAGE_CLASS", "other")
+    assert load_settings(_isolated_hermes_home).workspace_storage_class == "other"
+    monkeypatch.setenv("HERMES_K8S_WORKSPACE_STORAGE_CLASS", "")
+    assert load_settings(_isolated_hermes_home).workspace_storage_class is None
+    assert Settings().workspace_storage_class is None

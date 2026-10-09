@@ -20,3 +20,9 @@ def test_different_sessions_differ_and_profile_is_part_of_hash():
 def test_slug_handles_empty_and_long():
     assert slug("") == "default"
     assert len(slug("x" * 200)) <= 40 and DNS1123.match(slug("--A--" + "b" * 100))
+
+
+def test_workspace_claim_is_pod_name_plus_ws_and_dns1123():
+    ident = Identity("x" * 80, "s" * 300)
+    assert ident.workspace_claim == ident.pod_name + "-ws"
+    assert DNS1123.match(ident.workspace_claim) and len(ident.workspace_claim) <= 63

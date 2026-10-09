@@ -122,3 +122,52 @@ def test_docker_true_hardens_work_and_cli_but_not_root_containers():
             assert "runAsNonRoot" not in sc and "seccompProfile" not in sc, name
         assert "runAsNonRoot" not in pod["spec"]["securityContext"]
         assert "seccompProfile" not in pod["spec"]["securityContext"]
+
+
+def test_workspace_is_the_session_pvc_with_fsgroup_change_policy():
+    for s in (KATA, Settings(docker=False)):
+        pod = _pod(s)
+        vols = {v["name"]: v for v in pod["spec"]["volumes"]}
+        assert vols["workspace"] == {"name": "workspace", "persistentVolumeClaim": {
+            "claimName": Identity("mars", "sess-1").workspace_claim}}
+        assert pod["spec"]["securityContext"]["fsGroup"] == 1000
+        assert pod["spec"]["securityContext"]["fsGroupChangePolicy"] == "OnRootMismatch"
+        assert {"name": "workspace", "mountPath": "/workspace"} in _containers(pod)["work"]["volumeMounts"]
+
+
+def test_workspace_change_leaves_every_other_volume_alone():
+    vols = {v["name"]: v for v in _pod()["spec"]["volumes"]}
+    assert set(vols) == {"workspace", "docker-sock", "profile", "docker-disk", "dind-image"}
+    assert vols["docker-sock"] == {"name": "docker-sock", "emptyDir": {}}
+    assert "ephemeral" in vols["docker-disk"]
+
+
+def test_pod_is_labelled_component_sandbox():
+    assert _pod()["metadata"]["labels"]["app.kubernetes.io/component"] == "sandbox"
+
+
+def test_workspace_claim_manifest():
+    from kubernetes_sandbox.podspec import render_workspace_claim
+    ident = Identity("mars", "sess-1")
+    s = Settings(docker=False, workspace_size="20Gi", workspace_retention_seconds=3600,
+                 workspace_storage_class="fast-fs")
+    pvc = render_workspace_claim(s, ident)
+    pod = render_pod(s, ident, now_iso="x", created_by="x")
+    md = pvc["metadata"]
+    assert pvc["kind"] == "PersistentVolumeClaim" and md["name"] == ident.workspace_claim
+    assert md["namespace"] == s.namespace
+    identity_labels = {k: v for k, v in pod["metadata"]["labels"].items()
+                       if k not in ("hermes-sandbox/template-hash", "app.kubernetes.io/component")}
+    assert md["labels"] == {**identity_labels, "app.kubernetes.io/component": "workspace"}
+    assert md["annotations"] == {"hermes-sandbox/session-key": "sess-1",
+                                 "hermes-sandbox/workspace-retention-seconds": "3600"}
+    assert pvc["spec"] == {"accessModes": ["ReadWriteOnce"], "storageClassName": "fast-fs",
+                           "resources": {"requests": {"storage": "20Gi"}}}
+
+
+def test_workspace_claim_omits_storage_class_for_cluster_default():
+    from kubernetes_sandbox.podspec import render_workspace_claim
+    pvc = render_workspace_claim(Settings(docker=False), Identity("mars", "sess-1"))
+    assert "storageClassName" not in pvc["spec"]
+    assert pvc["spec"]["resources"]["requests"]["storage"] == "10Gi"
+    assert pvc["metadata"]["annotations"]["hermes-sandbox/workspace-retention-seconds"] == "604800"
