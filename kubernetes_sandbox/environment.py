@@ -5,13 +5,14 @@ import atexit
 import datetime as dt
 import os
 import socket
+import threading
 import time
 import uuid
 
 from tools.environments.base import BaseEnvironment, EnvironmentConnectionError, get_activity_callback
 
 from .exec_stream import ExecDisconnected, ExecFailed, StreamingExecHandle, connect_exec
-from .kube import KubeClient, KubeError, NotFound, QuotaExceeded
+from .kube import Conflict, KubeClient, KubeError, NotFound, QuotaExceeded
 from .naming import ANN_LAST_USED, ANN_SESSION_KEY, LBL_PROFILE, LBL_TEMPLATE_HASH, MANAGED_BY, Identity, slug
 from .podspec import render_pod, template_hash
 from .runner import exec_argv, kill_argv, stdin_payload
@@ -60,7 +61,8 @@ class KubernetesEnvironment(BaseEnvironment):
         self._clock, self._sleep = clock, sleep
         self._pod_ready = False
         self._last_touch = 0.0
-        self._last_handle = None
+        self._lock = threading.RLock()
+        self._had_pod = False
 
     # --- Pod lifecycle -------------------------------------------------------
     def _notify(self, msg: str) -> None:
@@ -101,33 +103,49 @@ class KubernetesEnvironment(BaseEnvironment):
         msg = interlock_error(self._s)
         if msg:
             raise EnvironmentConnectionError(msg, retry_hint="Fix kubernetes-sandbox.yaml; retrying will not help.")
-        name = self._id.pod_name
-        try:
-            pod = self._client.get_pod(name)
-            if self._matches(pod):
-                if not _ready(pod):
-                    self._wait_ready(name)
-                self._pod_ready = True
+        with self._lock:
+            if self._pod_ready:
                 return
-            self._client.delete_pod(name, grace_seconds=0)
-            self._wait_gone(name)
-        except NotFound:
-            pass
-        self._check_capacity()
-        manifest = render_pod(self._s, self._id, now_iso=_now_iso(self._clock()),
-                              created_by=f"{socket.gethostname()}:{os.getpid()}")
-        try:
-            self._client.create_pod(manifest)
-        except QuotaExceeded as e:
-            raise EnvironmentConnectionError(
-                f"Sandbox capacity exhausted in namespace {self._s.namespace}: {e}",
-                retry_hint="Retry after an idle session's sandbox is reaped, or ask the operator to raise the quota.")
-        except KubeError as e:
-            raise EnvironmentConnectionError(f"Could not create sandbox Pod {name}: {e}")
-        self._notify("starting sandbox Pod")
-        self._wait_ready(name)
-        self._pod_ready = True
-        self._last_touch = self._clock()
+            self._ensure_pod_locked()
+
+    def _ensure_pod_locked(self) -> None:
+        name = self._id.pod_name
+        for _attempt in range(2):
+            try:
+                pod = self._client.get_pod(name)
+                if self._matches(pod):
+                    if not _ready(pod):
+                        self._wait_ready(name)
+                    self._pod_ready = self._had_pod = True
+                    return
+                self._client.delete_pod(name, grace_seconds=0)
+                self._wait_gone(name)
+            except NotFound:
+                pass
+            self._check_capacity()
+            manifest = render_pod(self._s, self._id, now_iso=_now_iso(self._clock()),
+                                  created_by=f"{socket.gethostname()}:{os.getpid()}")
+            try:
+                self._client.create_pod(manifest)
+            except Conflict:
+                continue  # someone else created it meanwhile: loop back and adopt
+            except QuotaExceeded as e:
+                raise EnvironmentConnectionError(
+                    f"Sandbox capacity exhausted in namespace {self._s.namespace}: {e}",
+                    retry_hint="Retry after an idle session's sandbox is reaped, or ask the operator to raise the quota.")
+            except KubeError as e:
+                raise EnvironmentConnectionError(f"Could not create sandbox Pod {name}: {e}")
+            self._snapshot_ready = False  # the snapshot lives in the Pod's /tmp
+            if self._had_pod:
+                self._mark_recreated()
+            self._notify("starting sandbox Pod")
+            self._wait_ready(name)
+            self._pod_ready = self._had_pod = True
+            self._last_touch = self._clock()
+            return
+        raise EnvironmentConnectionError(
+            f"Could not create sandbox Pod {name}: it keeps conflicting with an existing Pod",
+            retry_hint="Retry the command.")
 
     def _wait_ready(self, name: str) -> None:
         deadline = self._clock() + self._s.ready_timeout_seconds
@@ -160,6 +178,8 @@ class KubernetesEnvironment(BaseEnvironment):
     def _before_execute(self) -> None:
         if not self._pod_ready:
             self.ensure_pod()
+        if not self._snapshot_ready:
+            self.init_session()
         self._touch_last_used()
 
     def _start(self, cmd_string, login, timeout, stdin_data):
@@ -174,7 +194,6 @@ class KubernetesEnvironment(BaseEnvironment):
 
         handle = self._exec(pod, "work", exec_argv(exec_id, login=login, timeout=timeout),
                             stdin_payload(cmd_string, stdin_data), on_kill)
-        self._last_handle = handle
         return handle
 
     def _run_bash(self, cmd_string, *, login=False, timeout=120, stdin_data=None):
@@ -185,15 +204,16 @@ class KubernetesEnvironment(BaseEnvironment):
         except NotFound:
             self._pod_ready = False
             self.ensure_pod()
-            self._mark_recreated()
             return self._start(cmd_string, login, timeout, stdin_data)
 
-    def execute(self, command, cwd="", **kwargs):
-        self._last_handle = None
-        result = super().execute(command, cwd, **kwargs)
-        h = self._last_handle
-        err = getattr(h, "error", None) if h is not None else None
-        if isinstance(err, (ExecDisconnected, ExecFailed)) and not getattr(h, "_killed").is_set():
+    def _wait_for_process(self, proc, timeout=120, *, bounded_capture=False, watch_interrupt_tid=None,
+                          yield_handler=None):
+        result = super()._wait_for_process(
+            proc, timeout, bounded_capture=bounded_capture, watch_interrupt_tid=watch_interrupt_tid,
+            yield_handler=yield_handler)
+        err = getattr(proc, "error", None)
+        killed = getattr(proc, "_killed", None)
+        if isinstance(err, (ExecDisconnected, ExecFailed)) and not (killed is not None and killed.is_set()):
             if isinstance(err, ExecDisconnected):
                 self._pod_ready = False  # re-check the Pod (and recreate it if gone) on the next command
             raise EnvironmentConnectionError(
@@ -209,3 +229,4 @@ class KubernetesEnvironment(BaseEnvironment):
         except Exception:
             pass
         self._pod_ready = False
+        self._had_pod = False

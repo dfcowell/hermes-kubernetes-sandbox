@@ -1,9 +1,12 @@
+import threading
+
 import pytest
 from fakes import FakeExec, FakeKube
 from kubernetes_sandbox import environment as envmod
 from kubernetes_sandbox.environment import KubernetesEnvironment
-from kubernetes_sandbox.naming import ANN_SESSION_KEY, Identity
-from kubernetes_sandbox.podspec import render_pod
+from kubernetes_sandbox.kube import Conflict
+from kubernetes_sandbox.naming import ANN_SESSION_KEY, LBL_TEMPLATE_HASH, Identity
+from kubernetes_sandbox.podspec import render_pod, template_hash
 from kubernetes_sandbox.settings import Settings
 from tools.environments.base import EnvironmentConnectionError
 
@@ -67,6 +70,7 @@ def test_quota_exhausted_raises_connection_error():
     e, _, _ = _env(kube=FakeKube(quota=0))
     with pytest.raises(EnvironmentConnectionError, match="capacity exhausted") as ei:
         e.ensure_pod()
+    assert e._client.calls.count(("create", ID.pod_name)) == 1
     assert "idle" in ei.value.retry_hint
 
 
@@ -134,3 +138,168 @@ def test_dropped_stream_raises_environment_connection_error():
     e._snapshot_ready = True
     with pytest.raises(EnvironmentConnectionError, match="exec stream"):
         e.execute("echo hi")
+
+
+class DropConn:
+    def send(self, d):
+        pass
+
+    def recv(self, timeout=None):
+        raise ConnectionError("reset by peer")
+
+    def close(self):
+        pass
+
+
+def test_template_hash_mismatch_is_replaced():
+    kube = FakeKube(ready_after=0)
+    old = render_pod(S, ID, now_iso="2026-01-01T00:00:00Z", created_by="old")
+    old["metadata"]["labels"][LBL_TEMPLATE_HASH] = "stale"
+    kube.create_pod(old)
+    kube.calls.clear()
+    e, _, _ = _env(kube=kube)
+    e.ensure_pod()
+    assert ("delete", ID.pod_name) in kube.calls and ("create", ID.pod_name) in kube.calls
+    assert kube.pods[ID.pod_name]["metadata"]["labels"][LBL_TEMPLATE_HASH] == template_hash(S)
+
+
+def test_failed_pod_is_replaced():
+    kube = FakeKube(ready_after=0)
+    kube.create_pod(render_pod(S, ID, now_iso="2026-01-01T00:00:00Z", created_by="old"))
+    kube.pods[ID.pod_name]["status"] = {"phase": "Failed"}
+    kube.calls.clear()
+    e, _, _ = _env(kube=kube)
+    kube._gets[ID.pod_name] = -10  # stay un-Ready for the first get so the Failed phase is seen
+    e.ensure_pod()
+    assert ("delete", ID.pod_name) in kube.calls and ("create", ID.pod_name) in kube.calls
+
+
+def test_concurrent_executes_only_the_dropping_one_raises():
+    from kubernetes_sandbox.exec_stream import StreamingExecHandle
+
+    inner = FakeExec()
+
+    def selective(pod, container, argv, payload, on_kill):
+        if b"DROPME" in payload:
+            return StreamingExecHandle(lambda: DropConn(), payload, on_kill)
+        return inner(pod, container, argv, payload, on_kill)
+
+    e, _, _ = _env(ex=selective)
+    e.ensure_pod()
+    e._snapshot_ready = True
+    outcomes = {}
+
+    def go(name, cmd):
+        try:
+            outcomes[name] = e.execute(cmd)
+        except EnvironmentConnectionError as exc:
+            outcomes[name] = exc
+
+    ts = [threading.Thread(target=go, args=("bad", "echo DROPME")),
+          threading.Thread(target=go, args=("good", "echo fine"))]
+    [t.start() for t in ts]
+    [t.join(30) for t in ts]
+    assert isinstance(outcomes["bad"], EnvironmentConnectionError)
+    assert isinstance(outcomes["good"], dict) and outcomes["good"]["returncode"] == 0
+
+
+def test_lost_pod_after_dropped_stream_is_recreated_with_notice():
+    from kubernetes_sandbox.exec_stream import StreamingExecHandle
+
+    inner, state = FakeExec(), {"drop": False}
+
+    def ex(pod, container, argv, payload, on_kill):
+        if state["drop"]:
+            state["drop"] = False
+            return StreamingExecHandle(lambda: DropConn(), payload, on_kill)
+        return inner(pod, container, argv, payload, on_kill)
+
+    e, kube, _ = _env(ex=ex)
+    e.ensure_pod()
+    e._snapshot_ready = True
+    state["drop"] = True
+    kube.pods.clear()
+    with pytest.raises(EnvironmentConnectionError):
+        e.execute("echo hi")
+    result = e.execute("echo hi")
+    assert result["returncode"] == 0 and result["environment_recreated"] is True
+    assert kube.calls.count(("create", ID.pod_name)) == 2
+
+
+def test_ensure_pod_is_locked_single_create():
+    kube = FakeKube(ready_after=2)
+    e, _, _ = _env(kube=kube)
+    ts = [threading.Thread(target=e.ensure_pod) for _ in range(4)]
+    [t.start() for t in ts]
+    [t.join(30) for t in ts]
+    assert kube.calls.count(("create", ID.pod_name)) == 1
+
+
+def test_conflict_on_create_adopts_the_pod():
+    kube = FakeKube(ready_after=0)
+    real_create = kube.create_pod
+
+    def racing_create(manifest):
+        real_create(manifest)  # the other gateway wins the race
+        raise Conflict(409, "AlreadyExists", manifest["metadata"]["name"])
+
+    kube.create_pod = racing_create
+    e, _, _ = _env(kube=kube)
+    e.ensure_pod()
+    assert e._pod_ready and kube.calls.count(("create", ID.pod_name)) == 1
+
+
+def test_persistent_conflict_raises():
+    kube = FakeKube()
+
+    def always(manifest):
+        raise Conflict(409, "AlreadyExists", "x")
+
+    kube.create_pod = always
+    e, _, _ = _env(kube=kube)
+    with pytest.raises(EnvironmentConnectionError, match="conflicting"):
+        e.ensure_pod()
+
+
+def test_default_exec_connect_recreates_deleted_pod(monkeypatch):
+    from kubernetes_sandbox.exec_stream import ERROR, encode_frame
+    import json
+
+    class Conn:
+        def __init__(self):
+            self.frames = [b"\x01ok\n", encode_frame(ERROR, json.dumps({"status": "Success"}).encode())]
+
+        def send(self, d):
+            pass
+
+        def recv(self, timeout=None):
+            if self.frames:
+                return self.frames.pop(0)
+            raise ConnectionError("closed")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(envmod, "connect_exec", lambda client, pod, container, argv: Conn())
+    kube = FakeKube()
+    e = KubernetesEnvironment(settings=S, identity=ID, cwd="/workspace", timeout=30, client=kube,
+                              sleep=lambda s: None)
+    assert e.execute("echo hi")["returncode"] == 0
+    kube.pods.clear()
+    result = e.execute("echo hi")
+    assert result["returncode"] == 0 and result["environment_recreated"] is True
+    assert kube.calls.count(("create", ID.pod_name)) == 2
+
+
+def test_session_snapshot_bootstrapped_lazily_and_again_after_recreate():
+    e, kube, ex = _env()
+    e.execute("echo hi")
+    logins = [r for r in ex.runs if r["argv"][-2] == "1"]
+    assert len(logins) == 1 and len(ex.runs) == 2   # bootstrap (login) then the command
+    assert logins[0] is ex.runs[0]
+    assert e._snapshot_ready is True
+    kube.pods.clear()
+    e._pod_ready = False
+    n = len(ex.runs)
+    e.execute("echo hi")
+    assert ex.runs[n]["argv"][-2] == "1"            # bootstrap again in the new Pod
