@@ -686,3 +686,90 @@ def test_new_pod_after_cleanup_mounts_the_same_pvc():
     assert kube.pvcs[ID.workspace_claim]["metadata"]["uid"] == uid
     assert kube.calls.count(("create_pvc", ID.workspace_claim)) == 1
 
+
+
+# --- carry-over R2-R5 ----------------------------------------------------------------------------
+def test_template_hash_replacement_after_restart_marks_recreated():
+    kube = FakeKube(ready_after=0)
+    old = render_pod(S, ID, now_iso="2026-01-01T00:00:00Z", created_by="old-gateway")
+    old["metadata"]["labels"][LBL_TEMPLATE_HASH] = "stale"
+    kube.create_pod(old)
+    e, _, _ = _env(kube=kube)       # fresh process: nothing served yet
+    assert e.execute("echo hi")["environment_recreated"] is True
+    assert ("delete", ID.pod_name) in kube.calls
+
+
+def test_replacing_another_sessions_pod_is_not_a_recreate():
+    kube = FakeKube(ready_after=0)
+    foreign = render_pod(S, ID, now_iso="2026-01-01T00:00:00Z", created_by="old")
+    foreign["metadata"]["annotations"][ANN_SESSION_KEY] = "someone-else"
+    kube.create_pod(foreign)
+    e, _, _ = _env(kube=kube)
+    assert e.execute("echo hi").get("environment_recreated") is None
+
+
+def test_pod_ready_is_set_only_after_restore_cwd():
+    e, kube, _ = _env()
+    e.ensure_pod()
+    seen = []
+    real = e._restore_cwd
+
+    def spy():
+        seen.append(e._pod_ready)
+        real()
+
+    e._restore_cwd = spy
+    kube.pods.clear()
+    e._pod_ready = False
+    e.ensure_pod()                                   # recreate path
+    kube.pods.clear()
+    kube.create_pod(render_pod(S, ID, now_iso="2026-01-01T00:00:00Z", created_by="another-gateway"))
+    e._pod_ready = False
+    e.ensure_pod()                                   # adopt-a-replacement path
+    assert seen == [False, False] and e._pod_ready
+
+
+def test_liveness_check_retries_a_transient_error_once():
+    from kubernetes_sandbox.kube import KubeError
+    e, kube, _ = _env()
+    e.execute("echo hi")
+    real, fails = kube.get_pod, [KubeError(503, "ServiceUnavailable", "blip")]
+
+    def flaky(name):
+        if fails:
+            raise fails.pop()
+        return real(name)
+
+    kube.get_pod = flaky
+    result = e.execute("echo hi")
+    assert result["returncode"] == 0 and result.get("environment_recreated") is None
+
+
+def test_liveness_check_gives_up_after_the_retry():
+    from kubernetes_sandbox.kube import KubeError
+    e, kube, _ = _env()
+    e.execute("echo hi")
+    calls = []
+
+    def down(name):
+        calls.append(name)
+        raise KubeError(503, "ServiceUnavailable", "down")
+
+    kube.get_pod = down
+    with pytest.raises(EnvironmentConnectionError, match="503"):
+        e.execute("echo hi")
+    assert len(calls) == 2
+
+
+def test_non_json_2xx_body_is_a_connection_error():
+    import json
+    e, kube, _ = _env()
+    kube.get_pod = _raising(json.JSONDecodeError("Expecting value", "<html>secret</html>", 0))
+    with pytest.raises(EnvironmentConnectionError, match="JSONDecodeError") as ei:
+        e.ensure_pod()
+    assert "secret" not in str(ei.value)
+    e2, kube2, _ = _env()
+    e2.execute("echo hi")
+    kube2.get_pod = _raising(json.JSONDecodeError("Expecting value", "<html/>", 0))
+    with pytest.raises(EnvironmentConnectionError, match="JSONDecodeError"):
+        e2.execute("echo hi")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import atexit
 import datetime as dt
+import json
 import os
 import shlex
 import socket
@@ -54,7 +55,8 @@ def _remember(name: str, uid: str | None) -> None:
         _SERVED_PODS[name] = uid
 
 
-_API_ERRORS = (KubeError, httpx.HTTPError, OSError)
+# JSONDecodeError: a 2xx whose body is not JSON (a proxy's HTML page). Its message carries only the position.
+_API_ERRORS = (KubeError, httpx.HTTPError, OSError, json.JSONDecodeError)
 
 
 def _api_error(what: str, e: BaseException) -> EnvironmentConnectionError:
@@ -210,14 +212,19 @@ class KubernetesEnvironment(BaseEnvironment):
     def _check_alive(self) -> None:
         """Runs on the caller's thread before every command, never inside Hermes's bounded
         worker: a Pod that vanished (janitor, OOM, drain), stopped being Ready, or was replaced
-        under the same name (uid change) is re-ensured before the command is started."""
-        try:
-            pod = self._client.get_pod(self._id.pod_name)
-        except NotFound:
-            self._pod_ready = False
-            return
-        except _API_ERRORS as e:
-            raise _api_error(f"Could not check sandbox Pod {self._id.pod_name}", e) from None
+        under the same name (uid change) is re-ensured before the command is started. A failing
+        API call is retried once: a transient 5xx must not make Hermes evict the environment."""
+        for attempt in range(2):
+            try:
+                pod = self._client.get_pod(self._id.pod_name)
+                break
+            except NotFound:
+                self._pod_ready = False
+                return
+            except _API_ERRORS as e:
+                if attempt:
+                    raise _api_error(f"Could not check sandbox Pod {self._id.pod_name}", e) from None
+                self._sleep(1)
         if not (self._matches(pod) and _ready(pod)) or _uid(pod) != self._pod_uid:
             self._pod_ready = False
 
@@ -228,6 +235,7 @@ class KubernetesEnvironment(BaseEnvironment):
 
     def _ensure_pod_locked(self) -> None:
         name = self._id.pod_name
+        replaced_own = False
         for _attempt in range(2):
             try:
                 pod = self._client.get_pod(name)
@@ -242,11 +250,17 @@ class KubernetesEnvironment(BaseEnvironment):
                         self._new_pod()
                         self._mark_recreated()
                     self._pod_uid = uid
-                    self._pod_ready = self._had_pod = True
+                    self._had_pod = True
                     _remember(name, uid)
                     if replaced:
                         self._restore_cwd()
+                    # Only now: a concurrent command must not pass _before_execute mid-restore.
+                    self._pod_ready = True
                     return
+                # Stale template, finished, terminating, or another session's: replace it. Replacing
+                # this session's own Pod is a recreate even if this process never served it.
+                if ((pod.get("metadata") or {}).get("annotations") or {}).get(ANN_SESSION_KEY) == self._id.session_key:
+                    replaced_own = True
                 self._client.delete_pod(name, grace_seconds=0)
                 self._wait_gone(name)
             except NotFound:
@@ -264,17 +278,18 @@ class KubernetesEnvironment(BaseEnvironment):
             except KubeError as e:
                 raise EnvironmentConnectionError(f"Could not create sandbox Pod {name}: {e}")
             self._new_pod()
-            recreated = self._had_pod or _served(name)
+            recreated = self._had_pod or _served(name) or replaced_own
             if recreated:
                 self._mark_recreated()
             self._notify("starting sandbox Pod")
             pod = self._wait_ready(name)
             self._pod_uid = _uid(pod)
-            self._pod_ready = self._had_pod = True
+            self._had_pod = True
             _remember(name, self._pod_uid)
             self._last_touch = self._clock()
             if recreated:
                 self._restore_cwd()
+            self._pod_ready = True  # after _restore_cwd, as above
             return
         raise EnvironmentConnectionError(
             f"Could not create sandbox Pod {name}: it keeps conflicting with an existing Pod",
