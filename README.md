@@ -71,11 +71,16 @@ workspace is intact but processes and Docker state are not.
 
 **Retention.** The plugin stamps `workspace_retention` (default `7d`) on each PVC as
 `hermes-sandbox/workspace-retention-seconds`. The janitor, every run, stamps a PVC that no Pod
-mounts with `hermes-sandbox/unused-since` (its own clock, accurate to one run), removes the stamp
-when a Pod mounts it again, and deletes the PVC (uid precondition) once `unused-since` is older than
-the retention. Malformed annotations restart the clock; they never delete a volume. A session that
-returns after its workspace was deleted gets a fresh, empty one. The plugin never deletes a PVC and
-its RBAC has no `delete` on them.
+mounts with `hermes-sandbox/unused-since` (its own clock, accurate to one run) and deletes it once
+`unused-since` is older than the retention. The stamp is cleared by the plugin every time it starts
+a Pod on the volume (before the Pod is created, so even a session shorter than the janitor's
+interval restarts the clock) and by the janitor whenever it sees the volume mounted. The janitor
+deletes with `uid` + `resourceVersion` preconditions from its listing, so a PVC the plugin touched
+after that listing is skipped (409) and re-evaluated next run; if the delete wins instead, the
+plugin sees the PVC terminating, waits it out and creates a fresh, empty workspace. Malformed or
+future `unused-since` stamps restart the clock; they never delete a volume. A session that returns
+after its workspace was deleted gets a fresh, empty one. The plugin never deletes a PVC: its RBAC
+has `create`/`get`/`list`/`patch` on them, no `delete`.
 
 **Storage class.** Any `ReadWriteOnce` filesystem StorageClass; `workspace_storage_class` unset uses
 the cluster default. `workspace_size` is the PVC's request; changing it affects new workspaces only
@@ -169,9 +174,17 @@ kept.
   soak numbers in the Kata example predate it.
 - A workspace PVC with a matching name but foreign labels or session key is never mounted: the
   command fails with a non-retryable error until an operator removes that PVC.
-- If the janitor deletes an expired workspace at the moment a returning session starts a Pod (its
-  Pod list is a few seconds old), the new Pod may get a fresh, empty workspace; a Pod left Pending on
-  the deleted claim is healed by the plugin re-creating the claim on the next command.
+- An expired workspace races a returning session only inside the janitor's list-to-delete
+  window: the plugin clears the idle stamp before it creates the Pod, which changes the PVC's
+  resourceVersion and fails the janitor's DELETE precondition. If the DELETE lands first, the plugin
+  sees the PVC terminating and starts the session on a fresh, empty workspace (with the
+  `environment_recreated` notice).
+- A Pod on a lost node holds its `ReadWriteOnce` workspace until the attach-detach controller
+  force-detaches the volume (about 6 minutes), on top of the Pod being stuck Terminating; until then
+  the session's new Pod waits (`Multi-Attach`) and commands fail with retryable errors.
+- Replacing a Pod is always a graceful delete (10 s grace) and waits up to 90 s for the old Pod to
+  be gone before creating the new one, so two Pods never mount the workspace at once; if the old
+  one is still terminating the command fails with a retryable error.
 - Scripts are limited to 128 KiB (same as the docker backend).
 - The runner's `exec_id` (used to find and kill a command) is not validated in the Pod: it is an
   internal uuid, never user input.

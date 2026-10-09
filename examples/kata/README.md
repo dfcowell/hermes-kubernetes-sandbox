@@ -43,7 +43,7 @@ Then put `kubernetes-sandbox.yaml` (edit the StorageClass) in `$HERMES_HOME` and
 ## Give the gateway the driver credentials
 
 The plugin talks to the API server as the `hermes-sandbox-driver` ServiceAccount (`rbac.yaml`:
-Pods, `pods/exec`, `pods/log`, and create/get/list on PersistentVolumeClaims, in `agent-sandbox` only). Run the Hermes Pod as that ServiceAccount, turn
+Pods, `pods/exec`, `pods/log`, and create/get/list/patch on PersistentVolumeClaims, in `agent-sandbox` only). Run the Hermes Pod as that ServiceAccount, turn
 off the automatic token mount, and project a short-lived token plus the cluster CA on the **gateway
 container only**, so no other container in the Pod sees it. The plugin re-reads the token file on
 every request, so kubelet's rotation just works.
@@ -92,9 +92,11 @@ and the next command starts a new Pod that mounts the same workspace volume. The
 
 - reaps idle Pods (`IDLE_SECONDS`), finished Pods, Pods past `max_lifetime_seconds` (the janitor
   is what enforces that annotation) and Pods a crashed (killed) gateway left behind;
-- stamps each workspace PVC that no Pod mounts with `hermes-sandbox/unused-since`, clears the stamp
-  when a Pod mounts it again, and deletes it once it has been unmounted for longer than its
-  retention: the PVC's `hermes-sandbox/workspace-retention-seconds` annotation (the plugin's
+- stamps each workspace PVC that no Pod mounts with `hermes-sandbox/unused-since` (the plugin
+  clears that stamp whenever it starts a Pod on the volume, and the janitor clears it when it sees
+  the volume mounted), and deletes it once it has been unmounted for longer than its retention,
+  only if the PVC is unchanged since the janitor listed it (uid + resourceVersion preconditions);
+  retention is the PVC's `hermes-sandbox/workspace-retention-seconds` annotation (the plugin's
   `workspace_retention`, default 7 days), else `WORKSPACE_RETENTION_SECONDS`.
 
 Set `NAMESPACE` to your sandbox namespace and the CronJob/ConfigMap namespace to your Hermes

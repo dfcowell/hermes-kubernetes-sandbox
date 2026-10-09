@@ -2,7 +2,8 @@
 # AS this ServiceAccount (serviceAccountName), or, if it must keep its own, bind the Role below to
 # that ServiceAccount instead. It lives in the Hermes namespace (`hermes` here -- CHANGE TO YOURS)
 # and is granted rights only inside `agent-sandbox`. PVCs: the plugin creates each session's workspace
-# volume (`<pod name>-ws`) and reads it back; it never deletes one -- only the janitor does.
+# volume (`<pod name>-ws`), reads it back, and patches it to clear the janitor's idle stamp
+# (`hermes-sandbox/unused-since`) on every Pod start; it never deletes one -- only the janitor does.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -27,7 +28,7 @@ rules:
     verbs: ["get"]
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
-    verbs: ["create", "get", "list"]
+    verbs: ["create", "get", "list", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
