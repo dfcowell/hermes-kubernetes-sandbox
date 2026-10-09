@@ -148,11 +148,12 @@ def test_delete_pvc_sends_uid_precondition_and_maps_conflict(settings):
         seen.update(method=req.method, path=req.url.path, body=json.loads(req.content))
         return httpx.Response(200, json={})
 
-    _client(settings, handler).delete_pvc("c", uid="u-1")
-    assert seen == {"method": "DELETE", "path": PVCS + "/c", "body": {"preconditions": {"uid": "u-1"}}}
+    _client(settings, handler).delete_pvc("c", uid="u-1", resource_version="7")
+    assert seen == {"method": "DELETE", "path": PVCS + "/c",
+                    "body": {"preconditions": {"uid": "u-1", "resourceVersion": "7"}}}
     with pytest.raises(Conflict):
-        _client(settings, lambda r: httpx.Response(409, json={"reason": "Conflict"})).delete_pvc("c", uid="u-2")
-    _client(settings, lambda r: httpx.Response(404, json={})).delete_pvc("gone", uid="u-3")
+        _client(settings, lambda r: httpx.Response(409, json={"reason": "Conflict"})).delete_pvc("c", uid="u-2", resource_version="8")
+    _client(settings, lambda r: httpx.Response(404, json={})).delete_pvc("gone", uid="u-3", resource_version="9")
 
 
 def test_non_json_2xx_body_raises_json_decode_error(settings):
@@ -164,3 +165,14 @@ def test_patch_pvc_returns_the_updated_object(settings):
     body = {"metadata": {"name": "c", "deletionTimestamp": "2026-10-09T00:00:00Z"}}
     got = _client(settings, lambda r: httpx.Response(200, json=body)).patch_pvc("c", {"metadata": {}})
     assert got == body
+
+
+def test_delete_pvc_sends_uid_and_resource_version_preconditions(settings):
+    seen = {}
+
+    def handler(req):
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json={})
+
+    _client(settings, handler).delete_pvc("c", uid="u-1", resource_version="42")
+    assert seen["body"] == {"preconditions": {"uid": "u-1", "resourceVersion": "42"}}

@@ -114,10 +114,12 @@ class KubeClient:
         return self._request("PATCH", self._pvcs(name), content=json.dumps(merge_patch),
                              headers={"Content-Type": "application/merge-patch+json"}).json()
 
-    def delete_pvc(self, name: str, *, uid: str) -> None:
-        """Deletes only the PVC with this uid (409 Conflict if the name now holds another)."""
+    def delete_pvc(self, name: str, *, uid: str, resource_version: str) -> None:
+        """Deletes only this PVC exactly as last read (409 Conflict if it changed or was replaced).
+        The plugin never calls it (its Role has no PVC delete); scripts/e2e.py does."""
         try:
-            self._request("DELETE", self._pvcs(name), json={"preconditions": {"uid": uid}})
+            self._request("DELETE", self._pvcs(name),
+                          json={"preconditions": {"uid": uid, "resourceVersion": resource_version}})
         except NotFound:
             pass
 

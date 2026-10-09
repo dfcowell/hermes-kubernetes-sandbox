@@ -161,7 +161,7 @@ def test_workspace_claim_manifest():
     assert md["labels"] == {**identity_labels, "app.kubernetes.io/component": "workspace"}
     assert md["annotations"] == {"hermes-sandbox/session-key": "sess-1",
                                  "hermes-sandbox/workspace-retention-seconds": "3600"}
-    assert pvc["spec"] == {"accessModes": ["ReadWriteOnce"], "storageClassName": "fast-fs",
+    assert pvc["spec"] == {"accessModes": ["ReadWriteOncePod"], "storageClassName": "fast-fs",
                            "resources": {"requests": {"storage": "20Gi"}}}
 
 
@@ -171,3 +171,11 @@ def test_workspace_claim_omits_storage_class_for_cluster_default():
     assert "storageClassName" not in pvc["spec"]
     assert pvc["spec"]["resources"]["requests"]["storage"] == "10Gi"
     assert pvc["metadata"]["annotations"]["hermes-sandbox/workspace-retention-seconds"] == "604800"
+
+
+def test_workspace_claim_access_mode_follows_the_setting():
+    from kubernetes_sandbox.podspec import render_workspace_claim
+    ident = Identity("mars", "sess-1")
+    assert render_workspace_claim(Settings(docker=False), ident)["spec"]["accessModes"] == ["ReadWriteOncePod"]
+    rwo = Settings(docker=False, workspace_access_mode="ReadWriteOnce")
+    assert render_workspace_claim(rwo, ident)["spec"]["accessModes"] == ["ReadWriteOnce"]

@@ -935,3 +935,57 @@ def test_pvc_quota_hint_is_about_storage():
     with pytest.raises(EnvironmentConnectionError, match="capacity exhausted") as ei:
         e.ensure_pod()
     assert "workspace_retention" in ei.value.retry_hint and "quota" in ei.value.retry_hint
+
+
+# --- fix round 2 ----------------------------------------------------------------------------------
+def test_existing_pvc_with_other_access_mode_is_adopted_as_is_and_warned_once(caplog):
+    import logging
+    kube = FakeKube()
+    rwo = Settings(runtime_class_name="kata", docker_disk_storage_class="b", ready_timeout_seconds=5,
+                   workspace_access_mode="ReadWriteOnce")
+    kube.create_pvc(_claim(settings=rwo))
+    uid = kube.pvcs[ID.workspace_claim]["metadata"]["uid"]
+    e, _, _ = _env(kube=kube)                      # default setting: ReadWriteOncePod
+    with caplog.at_level(logging.WARNING):
+        e.ensure_pod()
+        kube.pods.clear()
+        e._pod_ready = False
+        e.ensure_pod()
+    assert kube.pvcs[ID.workspace_claim]["metadata"]["uid"] == uid
+    assert kube.pvcs[ID.workspace_claim]["spec"]["accessModes"] == ["ReadWriteOnce"]
+    assert not any(c[0] == "delete_pvc" for c in kube.calls)
+    warnings = [r for r in caplog.records if "access mode" in r.getMessage()]
+    assert len(warnings) == 1 and ID.workspace_claim in warnings[0].getMessage()
+
+
+def test_adopting_a_ready_pod_clears_the_idle_stamp():
+    kube = FakeKube(ready_after=0)
+    kube.create_pvc(_claim())
+    kube.pvcs[ID.workspace_claim]["metadata"]["annotations"][UNUSED] = "2026-10-01T00:00:00Z"
+    kube.create_pod(render_pod(S, ID, now_iso="2026-01-01T00:00:00Z", created_by="crashed-gateway"))
+    e, _, _ = _env(kube=kube)
+    e.ensure_pod()
+    assert UNUSED not in kube.pvcs[ID.workspace_claim]["metadata"]["annotations"]
+    assert kube.calls.count(("create_pvc", ID.workspace_claim)) == 1   # the existing one, kept
+    assert kube.calls.count(("create", ID.pod_name)) == 1              # the crashed gateway's, adopted
+
+
+def test_adopting_a_ready_pod_tolerates_a_transient_unstamp_failure():
+    from kubernetes_sandbox.kube import KubeError
+    kube = FakeKube(ready_after=0)
+    kube.create_pvc(_claim())
+    kube.pvcs[ID.workspace_claim]["metadata"]["annotations"][UNUSED] = "2026-10-01T00:00:00Z"
+    kube.create_pod(render_pod(S, ID, now_iso="2026-01-01T00:00:00Z", created_by="crashed-gateway"))
+    kube.patch_pvc = _raising(KubeError(503, "ServiceUnavailable", "blip"))
+    e, _, _ = _env(kube=kube)
+    e.ensure_pod()
+    assert e._pod_ready
+
+
+def test_pvc_quota_hint_names_count_and_storage():
+    from kubernetes_sandbox.kube import QuotaExceeded
+    e, kube, _ = _env()
+    kube.create_pvc = _raising(QuotaExceeded(403, "Forbidden", "exceeded quota: persistentvolumeclaims"))
+    with pytest.raises(EnvironmentConnectionError) as ei:
+        e.ensure_pod()
+    assert "PVC count" in ei.value.retry_hint and "storage" in ei.value.retry_hint

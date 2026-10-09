@@ -17,5 +17,7 @@ def _isolated_hermes_home(tmp_path, monkeypatch):
 def _fresh_served_pods():
     from kubernetes_sandbox import environment
     environment._SERVED_PODS.clear()
+    environment._ACCESS_WARNED.clear()
     yield
     environment._SERVED_PODS.clear()
+    environment._ACCESS_WARNED.clear()

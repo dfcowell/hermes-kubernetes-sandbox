@@ -4,6 +4,7 @@ from __future__ import annotations
 import atexit
 import datetime as dt
 import json
+import logging
 import os
 import shlex
 import socket
@@ -21,6 +22,7 @@ from .podspec import identity_labels, render_pod, render_workspace_claim, templa
 from .runner import exec_argv, kill_argv, stdin_payload
 from .settings import Settings, interlock_error
 
+log = logging.getLogger(__name__)
 _PROCESS_EXITING = False
 
 
@@ -33,9 +35,13 @@ atexit.register(_mark_exiting)  # registered after Hermes's own hooks, so it run
 
 _LAST_USED_EVERY = 60.0
 
-# Every plugin-side Pod delete is graceful: a force delete (grace 0) removes the API object while
-# the old containers still run and still hold the RWO workspace volume, so a same-name Pod would
-# mount it twice (same node) or stick on Multi-Attach (other node).
+# The single-Pod guarantee on the workspace is the PVC's ReadWriteOncePod access mode (enforced by
+# the scheduler and the kubelet). ReadWriteOnce is per NODE: two Pods on one node can both mount it,
+# and only this graceful replace-then-wait guards against that. Either way every plugin-side Pod
+# delete is graceful: a force delete (grace 0) removes the API object while the old containers
+# still run and hold the volume, so a same-name Pod could co-mount it (RWO) or never be gone in
+# time. Re-issuing this delete on a Pod a drain/eviction is already deleting (30 s grace) shortens
+# that grace to 10 s; harmless for the volume, since the Pod object outlives the unmount.
 _DELETE_GRACE = 10
 # How long to wait for a deleted Pod (or PVC) to be gone: the grace period, plus Kata VM teardown
 # and the volume unmount/detach that must finish before the API object disappears.
@@ -46,6 +52,7 @@ _GONE_TIMEOUT = 90
 # Pod: creating a known name is a recreate, never a silent workspace reset.
 _SERVED_PODS: dict[str, str | None] = {}
 _SERVED_LOCK = threading.Lock()
+_ACCESS_WARNED: set[str] = set()  # workspace PVCs already warned about an access-mode mismatch
 
 
 def _served(name: str) -> bool:
@@ -180,8 +187,9 @@ class KubernetesEnvironment(BaseEnvironment):
                 except QuotaExceeded as e:
                     raise EnvironmentConnectionError(
                         f"Sandbox capacity exhausted in namespace {self._s.namespace}: {e}",
-                        retry_hint="Storage frees when an idle workspace expires (workspace_retention); retry "
-                                   "later, or ask the operator to raise the namespace's storage quota.") from None
+                        retry_hint="The namespace's PVC count / storage quota is full; it frees when an idle "
+                                   "workspace expires (workspace_retention). Retry later, or ask the operator "
+                                   "to raise the quota.") from None
             if not (pvc.get("metadata") or {}).get("deletionTimestamp") and self._owns_claim(pvc):
                 pvc = self._unstamp(pvc)
             if pvc is None:
@@ -198,9 +206,31 @@ class KubernetesEnvironment(BaseEnvironment):
                     f"Refusing to mount workspace volume {name}: its labels or session key do not match "
                     f"session {self._id.session_key!r} of profile {self._id.profile!r}",
                     retry_hint="An operator must delete or rename that PVC; retrying will not help.")
+            self._check_access_mode(pvc)
             return
         raise EnvironmentConnectionError(f"Could not create workspace volume {name}: it keeps changing",
                                          retry_hint="Retry the command.")
+
+    def _check_access_mode(self, pvc: dict) -> None:
+        """Access modes are immutable: an existing workspace is adopted as it is (never deleted or
+        recreated over a setting change), with one warning per volume per process."""
+        modes = (pvc.get("spec") or {}).get("accessModes") or []
+        name = self._id.workspace_claim
+        if modes != [self._s.workspace_access_mode] and name not in _ACCESS_WARNED:
+            _ACCESS_WARNED.add(name)
+            log.warning("workspace volume %s has access mode %s, not workspace_access_mode=%s; using it as it "
+                        "is (access modes are immutable; new workspaces get the setting)",
+                        name, ",".join(modes) or "unset", self._s.workspace_access_mode)
+
+    def _unstamp_adopted(self) -> None:
+        """Adopting a Ready Pod (e.g. a crashed gateway's): clear the idle stamp too, in case the
+        janitor never sees this Pod mounted. Best effort, except a missing RBAC verb."""
+        try:
+            pvc = self._client.get_pvc(self._id.workspace_claim)
+            if not (pvc.get("metadata") or {}).get("deletionTimestamp") and self._owns_claim(pvc):
+                self._unstamp(pvc)
+        except _API_ERRORS:
+            pass
 
     def _unstamp(self, pvc: dict) -> dict | None:
         """Clear the janitor's idle stamp before every Pod start, so a short session between two
@@ -285,6 +315,8 @@ class KubernetesEnvironment(BaseEnvironment):
                     if not _ready(pod):
                         self._ensure_workspace()  # a Pod Pending on a reaped claim schedules once it exists
                         pod = self._wait_ready(name)
+                    else:
+                        self._unstamp_adopted()
                     uid = _uid(pod)
                     known = self._pod_uid if self._pod_uid is not None else _served_uid(name)
                     replaced = known is not None and uid != known  # same name, another Pod

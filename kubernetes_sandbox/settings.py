@@ -36,6 +36,7 @@ class Settings:
     docker_disk_size: str = "30Gi"
     workspace_size: str = "10Gi"
     workspace_storage_class: str | None = None
+    workspace_access_mode: str = "ReadWriteOncePod"
     workspace_retention_seconds: int = 604800
     work_cpu: str = "100m"
     work_memory: str = "512Mi"
@@ -112,6 +113,9 @@ def _coerce(name: str, raw):
 def validate(s: Settings) -> Settings:
     if s.docker_cli not in ("image-volume", "init-copy"):
         raise SettingsError(f"docker_cli must be 'image-volume' or 'init-copy', got {s.docker_cli!r}")
+    if s.workspace_access_mode not in ("ReadWriteOncePod", "ReadWriteOnce"):
+        raise SettingsError("workspace_access_mode must be 'ReadWriteOncePod' (one Pod at a time; needs CSI "
+                            f"SINGLE_NODE_SINGLE_WRITER) or 'ReadWriteOnce' (one node), got {s.workspace_access_mode!r}")
     if s.docker and not s.docker_disk_storage_class:
         raise SettingsError("docker: true needs docker_disk_storage_class (a StorageClass that supports "
                             "volumeMode: Block; /var/lib/docker must not live on a shared filesystem)")

@@ -161,8 +161,8 @@ def delete_workspace(env) -> None:
     from kubernetes_sandbox.kube import KubeError, NotFound
     name, ns = env._id.workspace_claim, env._s.namespace
     try:
-        uid = env._client.get_pvc(name)["metadata"]["uid"]
-        env._client.delete_pvc(name, uid=uid)
+        md = env._client.get_pvc(name)["metadata"]
+        env._client.delete_pvc(name, uid=md["uid"], resource_version=md["resourceVersion"])
         print(f"deleted workspace PVC {name}", flush=True)
     except NotFound:
         pass

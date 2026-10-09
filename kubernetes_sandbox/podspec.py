@@ -122,8 +122,9 @@ def render_pod(s: Settings, ident: Identity, *, now_iso: str, created_by: str) -
 
 
 def render_workspace_claim(s: Settings, ident: Identity) -> dict:
-    """The session's /workspace volume. No template hash: it must survive template changes."""
-    spec: dict = {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": s.workspace_size}}}
+    """The session's /workspace volume. No template hash: it must survive template changes.
+    ReadWriteOncePod (default) lets exactly one Pod use it; ReadWriteOnce is per node."""
+    spec: dict = {"accessModes": [s.workspace_access_mode], "resources": {"requests": {"storage": s.workspace_size}}}
     if s.workspace_storage_class:
         spec["storageClassName"] = s.workspace_storage_class
     return {"apiVersion": "v1", "kind": "PersistentVolumeClaim",

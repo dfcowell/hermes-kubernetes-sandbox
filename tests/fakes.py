@@ -94,7 +94,7 @@ class FakeKube:
                 ann[k] = v
         return copy.deepcopy(self.pvcs[name])
 
-    def delete_pvc(self, name, *, uid):
+    def delete_pvc(self, name, *, uid, resource_version=None):
         self.calls.append(("delete_pvc", name))
         if name in self.pvcs and self.pvcs[name]["metadata"]["uid"] == uid:
             del self.pvcs[name]

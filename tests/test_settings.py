@@ -153,3 +153,16 @@ def test_workspace_storage_class_yaml_env_and_empty(_isolated_hermes_home, monke
     monkeypatch.setenv("HERMES_K8S_WORKSPACE_STORAGE_CLASS", "")
     assert load_settings(_isolated_hermes_home).workspace_storage_class is None
     assert Settings().workspace_storage_class is None
+
+
+def test_workspace_access_mode_default_yaml_env_and_invalid(_isolated_hermes_home, monkeypatch):
+    assert Settings().workspace_access_mode == "ReadWriteOncePod"
+    (_isolated_hermes_home / "kubernetes-sandbox.yaml").write_text(
+        "docker: false\nworkspace_access_mode: ReadWriteOnce\n")
+    assert load_settings(_isolated_hermes_home).workspace_access_mode == "ReadWriteOnce"
+    monkeypatch.setenv("HERMES_K8S_WORKSPACE_ACCESS_MODE", "ReadWriteOncePod")
+    assert load_settings(_isolated_hermes_home).workspace_access_mode == "ReadWriteOncePod"
+    for bad in ("ReadWriteMany", "rwop", "ReadOnlyMany"):
+        monkeypatch.setenv("HERMES_K8S_WORKSPACE_ACCESS_MODE", bad)
+        with pytest.raises(SettingsError, match="workspace_access_mode"):
+            load_settings(_isolated_hermes_home)
