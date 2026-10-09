@@ -73,3 +73,17 @@ def test_template_hash_changes_with_spec_not_identity():
     other = Settings(runtime_class_name="kata", docker_disk_storage_class="block-ephemeral", work_memory="1Gi")
     assert template_hash(KATA) != template_hash(other)
     assert template_hash(KATA) == template_hash(KATA)
+
+
+def test_readiness_probes_docker_from_work_not_dind():
+    for mode in ("image-volume", "init-copy"):
+        c = _containers(_pod(Settings(runtime_class_name="kata", docker_disk_storage_class="b", docker_cli=mode)))
+        assert "readinessProbe" not in c["dind"], mode
+        assert c["work"]["readinessProbe"]["exec"]["command"] == ["/opt/docker-cli/bin/docker", "info"], mode
+    assert "readinessProbe" not in _containers(_pod(Settings(docker=False)))["work"]
+
+
+def test_template_hash_covers_extra_pod_annotations():
+    other = Settings(runtime_class_name="kata", docker_disk_storage_class="block-ephemeral",
+                     extra_pod_annotations={"a": "b"})
+    assert template_hash(KATA) != template_hash(other)

@@ -37,6 +37,9 @@ def _spec(s: Settings) -> dict:
 
     spec["securityContext"]["supplementalGroups"] = [DOCKER_GID]
     work["env"].append({"name": "DOCKER_HOST", "value": "unix:///run/docker/docker.sock"})
+    # Probe from work, not dind: exec into the dockerd container fails under Kata.
+    work["readinessProbe"] = {"exec": {"command": [f"{_CLI_DIR}/bin/docker", "info"]},
+                              "periodSeconds": 2, "failureThreshold": 3}
     work["volumeMounts"] += [
         {"name": "docker-sock", "mountPath": "/run/docker"},
         {"name": "profile", "mountPath": "/etc/profile.d/docker-cli.sh", "subPath": "docker-cli.sh",
@@ -84,8 +87,6 @@ def _spec(s: Settings) -> dict:
                     "set -eu; mkdir -p /var/lib/docker; mount -t ext4 -o noatime /dev/docker-disk /var/lib/docker; "
                     f"exec dind dockerd --host=unix:///run/docker/docker.sock --group={DOCKER_GID} "
                     "--storage-driver=overlay2 --feature containerd-snapshotter=false"],
-        "readinessProbe": {"exec": {"command": ["docker", "-H", "unix:///run/docker/docker.sock", "info"]},
-                           "periodSeconds": 2, "failureThreshold": 3},
         "volumeDevices": [{"name": "docker-disk", "devicePath": "/dev/docker-disk"}],
         "volumeMounts": [{"name": "docker-sock", "mountPath": "/run/docker"},
                          {"name": "workspace", "mountPath": "/workspace"}],
@@ -96,7 +97,7 @@ def _spec(s: Settings) -> dict:
 
 
 def template_hash(s: Settings) -> str:
-    return hashlib.sha256(json.dumps(_spec(s), sort_keys=True).encode()).hexdigest()[:8]
+    return hashlib.sha256(json.dumps({"spec": _spec(s), "annotations": s.extra_pod_annotations}, sort_keys=True).encode()).hexdigest()[:8]
 
 
 def render_pod(s: Settings, ident: Identity, *, now_iso: str, created_by: str) -> dict:
