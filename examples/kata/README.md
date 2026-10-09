@@ -101,6 +101,9 @@ and the next command starts a new Pod that mounts the same workspace volume. The
   retention is the PVC's `hermes-sandbox/workspace-retention-seconds` annotation (the plugin's
   `workspace_retention`, default 7 days), else `WORKSPACE_RETENTION_SECONDS`.
 
+For draining nodes and force-deleting sandbox Pods safely, see "Operating: node drains and
+force-deletes" in the top-level README.
+
 Set `NAMESPACE` to your sandbox namespace and the CronJob/ConfigMap namespace to your Hermes
 namespace.
 

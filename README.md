@@ -122,6 +122,45 @@ The token file is re-read on every request, so renewing it needs no restart.
 The `work` image must provide GNU bash (the runner uses `read -N` and arrays), GNU coreutils
 (`head -c`, `wc`, `timeout`) and util-linux `setsid` (`--wait`). Hermes's default sandbox image does; busybox-only images do not.
 
+## Operating: node drains and force-deletes
+
+Sandbox Pods are bare Pods with `emptyDir` volumes, so `kubectl drain` refuses them by default
+("cannot delete Pods not managed by ReplicationController, ReplicaSet, Job, DaemonSet or
+StatefulSet", plus the `emptyDir` warning). Drain with:
+
+```bash
+kubectl drain <node> --ignore-daemonsets --force --delete-emptydir-data
+```
+
+`--force` only lifts drain's unmanaged-Pod check; the Pods are still evicted gracefully (their grace
+period, 30 s by default). The `emptyDir` contents (Docker socket, Docker CLI copy) are disposable;
+the workspace is on the PVC.
+
+**What a session sees.** The command in flight is lost, and the model gets a retryable "Lost the
+exec stream" error. The next command recreates the Pod on another node (the drained node is
+cordoned), waits for the workspace volume to detach from the old node and attach to the new one
+(normally seconds to a minute, within `ready_timeout_seconds`, default 180), then continues with
+the files and cwd intact and the `environment_recreated` notice. Running processes, background jobs
+and Docker images and containers are lost, as with any Pod deletion. If the volume move outlasts the
+ready timeout, the command returns a retryable "not ready" error and the next command waits again.
+
+**Force-deleting.** `kubectl delete pod --force --grace-period=0` removes the Pod object
+immediately while the old sandbox (the Kata VM) is still being torn down. On a cordoned node that
+is safe: the replacement lands on another node, and the attach-detach controller will not attach the
+`ReadWriteOnce`/`ReadWriteOncePod` volume there until the old node has unmounted it (a `Multi-Attach`
+warning and `ContainerCreating` in the meantime). Files written by the killed command are
+crash-consistent.
+
+**Never force-delete a sandbox Pod on a node that is not cordoned.** The replacement can schedule
+onto the same node while the old sandbox still has the workspace mounted: `ReadWriteOncePod`'s
+scheduler check sees only Pod objects, and the volume is already attached to that node, so two
+sandboxes could briefly write the same workspace (whether the CSI driver refuses the second mount is
+driver-specific). Prefer a graceful `kubectl delete pod` (the plugin itself always deletes with a
+10 s grace and waits for the old Pod to be gone), and cordon first if you must force.
+
+A node that is lost rather than drained holds the volume until the attach-detach controller
+force-detaches it (about 6 minutes); see Known limits.
+
 ## Settings
 
 Read from `$HERMES_HOME/kubernetes-sandbox.yaml` (optional); every key can be set or overridden by
@@ -197,6 +236,8 @@ kept.
   resourceVersion and fails the janitor's DELETE precondition. If the DELETE lands first, the plugin
   sees the PVC terminating and starts the session on a fresh, empty workspace (with the
   `environment_recreated` notice).
+- Node drains need `--force --delete-emptydir-data`, and a force-delete is only safe on a cordoned
+  node (see Operating: node drains and force-deletes).
 - A Pod on a lost node holds its workspace volume until the attach-detach controller
   force-detaches the volume (about 6 minutes), on top of the Pod being stuck Terminating; until then
   the session's new Pod waits (`Multi-Attach`) and commands fail with retryable errors.
