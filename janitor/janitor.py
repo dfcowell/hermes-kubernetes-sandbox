@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Reap Hermes sandbox Pods: idle too long, past max lifetime, or finished. Stdlib only."""
+"""Reap Hermes sandbox Pods (idle too long, past max lifetime, or finished) and workspace volumes
+unmounted for longer than their retention. Stdlib only."""
 from __future__ import annotations
 
 import datetime as dt
@@ -13,7 +14,11 @@ import urllib.parse
 import urllib.request
 
 SA = "/var/run/secrets/kubernetes.io/serviceaccount"
-SELECTOR = "app.kubernetes.io/managed-by=hermes-kubernetes-sandbox"
+MANAGED_BY = ("app.kubernetes.io/managed-by", "hermes-kubernetes-sandbox")
+SELECTOR = "=".join(MANAGED_BY)
+PVC_SELECTOR = SELECTOR + ",app.kubernetes.io/component=workspace"
+ANN_UNUSED_SINCE = "hermes-sandbox/unused-since"
+ANN_RETENTION = "hermes-sandbox/workspace-retention-seconds"
 
 
 def iso(ts: float) -> str:
@@ -50,11 +55,46 @@ def decide(pod: dict, now: float, idle_seconds: int) -> str | None:
     return None
 
 
-def _api(method: str, path: str, ctx, token: str, body: dict | None = None) -> dict:
+def mounted_claims(pods: list[dict]) -> set[str]:
+    """claimNames referenced by any Pod that has not finished (terminating Pods still hold theirs)."""
+    claims = set()
+    for p in pods:
+        if (p.get("status") or {}).get("phase") in ("Failed", "Succeeded"):
+            continue
+        for v in (p.get("spec") or {}).get("volumes") or []:
+            claim = (v.get("persistentVolumeClaim") or {}).get("claimName")
+            if claim:
+                claims.add(claim)
+    return claims
+
+
+def decide_pvc(pvc: dict, mounted: bool, now: float, default_retention: int) -> str | None:
+    """The idle clock is the janitor's own `unused-since` stamp (accurate to one run): never a
+    gateway's clock. Anything unparseable restarts the clock; garbage never deletes a volume."""
+    ann = (pvc.get("metadata") or {}).get("annotations") or {}
+    if mounted:
+        return "unstamp" if ANN_UNUSED_SINCE in ann else None
+    try:
+        since = parse(ann.get(ANN_UNUSED_SINCE))
+    except ValueError:
+        since = None
+    if since is None:
+        return "stamp"
+    try:
+        retention = int(ann.get(ANN_RETENTION, ""))
+    except ValueError:
+        retention = default_retention
+    if retention <= 0:
+        retention = default_retention
+    return "delete" if now - since > retention else None
+
+
+def _api(method: str, path: str, ctx, token: str, body: dict | None = None,
+         content_type: str = "application/json") -> dict:
     url = "https://kubernetes.default.svc" + path
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method, headers={
-        "Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+        "Authorization": f"Bearer {token}", "Content-Type": content_type})
     with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
         return json.loads(r.read() or b"{}")
 
@@ -69,10 +109,14 @@ def _load_api_context() -> tuple[str, object]:
 def main() -> int:
     ns = os.environ.get("NAMESPACE", "agent-sandbox")
     idle = int(os.environ.get("IDLE_SECONDS", "3600"))
+    retention = int(os.environ.get("WORKSPACE_RETENTION_SECONDS", "604800"))
     dry = os.environ.get("DRY_RUN") == "1"
     token, ctx = _load_api_context()
-    q = urllib.parse.urlencode({"labelSelector": SELECTOR})
-    pods = _api("GET", f"/api/v1/namespaces/{ns}/pods?{q}", ctx, token).get("items", [])
+    # Every Pod in the namespace, listed once: the reap pass takes only ours, while any Pod
+    # (ours or not) that mounts a workspace volume keeps that volume alive.
+    all_pods = _api("GET", f"/api/v1/namespaces/{ns}/pods", ctx, token).get("items", [])
+    pods = [p for p in all_pods
+            if ((p.get("metadata") or {}).get("labels") or {}).get(MANAGED_BY[0]) == MANAGED_BY[1]]
     now = time.time()
     had_error = False
     for p in pods:
@@ -103,7 +147,48 @@ def main() -> int:
             print(f"error {p.get('metadata', {}).get('name', 'unknown')}: {e}")
             had_error = True
     print(f"checked {len(pods)} sandbox pods")
+    had_error = _workspace_pass(ns, ctx, token, mounted_claims(all_pods), now, retention, dry) or had_error
     return 1 if had_error else 0
+
+
+def _workspace_pass(ns: str, ctx, token: str, mounted: set[str], now: float, retention: int, dry: bool) -> bool:
+    """Stamp unmounted workspace PVCs, clear the stamp when mounted again, delete expired ones."""
+    q = urllib.parse.urlencode({"labelSelector": PVC_SELECTOR})
+    pvcs = _api("GET", f"/api/v1/namespaces/{ns}/persistentvolumeclaims?{q}", ctx, token).get("items", [])
+    had_error = False
+    for c in pvcs:
+        try:
+            name = c["metadata"]["name"]
+            if c["metadata"].get("deletionTimestamp"):
+                print(f"skip {name}: terminating")
+                continue
+            action = decide_pvc(c, name in mounted, now, retention)
+            if action is None:
+                print(f"keep {name}")
+                continue
+            print(f"{'would ' if dry else ''}{action} {name}")
+            if dry:
+                continue
+            path = f"/api/v1/namespaces/{ns}/persistentvolumeclaims/{name}"
+            if action in ("stamp", "unstamp"):
+                value = iso(now) if action == "stamp" else None
+                _api("PATCH", path, ctx, token, {"metadata": {"annotations": {ANN_UNUSED_SINCE: value}}},
+                     content_type="application/merge-patch+json")
+                continue
+            try:
+                _api("DELETE", path, ctx, token, {"preconditions": {"uid": c["metadata"]["uid"]}})
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    print(f"gone {name}")
+                elif e.code == 409:
+                    print(f"skip {name}: changed")
+                else:
+                    raise
+        except Exception as e:
+            print(f"error {(c.get('metadata') or {}).get('name', 'unknown')}: {e}")
+            had_error = True
+    print(f"checked {len(pvcs)} workspace volumes")
+    return had_error
 
 
 if __name__ == "__main__":
