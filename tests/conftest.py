@@ -11,3 +11,11 @@ def _isolated_hermes_home(tmp_path, monkeypatch):
         if key.startswith("HERMES_K8S_"):
             monkeypatch.delenv(key, raising=False)
     yield home
+
+
+@pytest.fixture(autouse=True)
+def _fresh_served_pods():
+    from kubernetes_sandbox import environment
+    environment._SERVED_PODS.clear()
+    yield
+    environment._SERVED_PODS.clear()

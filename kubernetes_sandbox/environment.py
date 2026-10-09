@@ -31,6 +31,22 @@ atexit.register(_mark_exiting)  # registered after Hermes's own hooks, so it run
 
 _LAST_USED_EVERY = 60.0
 
+# Pod names this process has served. Hermes reaches env.cleanup() on gateway stop and on degraded
+# eviction as well as from its idle reaper, and a fresh env then starts with no memory of the old
+# Pod: creating a known name is a recreate, never a silent workspace reset.
+_SERVED_PODS: set[str] = set()
+_SERVED_LOCK = threading.Lock()
+
+
+def _served(name: str) -> bool:
+    with _SERVED_LOCK:
+        return name in _SERVED_PODS
+
+
+def _remember(name: str) -> None:
+    with _SERVED_LOCK:
+        _SERVED_PODS.add(name)
+
 
 def _now_iso(ts: float) -> str:
     return dt.datetime.fromtimestamp(ts, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -56,6 +72,8 @@ class KubernetesEnvironment(BaseEnvironment):
     def __init__(self, *, settings: Settings, identity: Identity, cwd: str, timeout: int,
                  client=None, exec_connect=None, clock=time.time, sleep=time.sleep):
         super().__init__(cwd=cwd or "/workspace", timeout=timeout)
+        # Read by Hermes's is_persistent_env(): the Pod lives for the session, not the turn.
+        self._session_scoped = True
         self._initial_cwd = self.cwd
         self._s, self._id = settings, identity
         self._client = client or KubeClient(settings)
@@ -119,6 +137,7 @@ class KubernetesEnvironment(BaseEnvironment):
                     if not _ready(pod):
                         self._wait_ready(name)
                     self._pod_ready = self._had_pod = True
+                    _remember(name)
                     return
                 self._client.delete_pod(name, grace_seconds=0)
                 self._wait_gone(name)
@@ -138,12 +157,13 @@ class KubernetesEnvironment(BaseEnvironment):
             except KubeError as e:
                 raise EnvironmentConnectionError(f"Could not create sandbox Pod {name}: {e}")
             self._snapshot_ready = False  # the snapshot lives in the Pod's /tmp
-            if self._had_pod:
+            recreated = self._had_pod or _served(name)
+            if recreated:
                 self._mark_recreated()
-            recreated = self._had_pod
             self._notify("starting sandbox Pod")
             self._wait_ready(name)
             self._pod_ready = self._had_pod = True
+            _remember(name)
             self._last_touch = self._clock()
             if recreated:
                 self._restore_cwd()

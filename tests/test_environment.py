@@ -107,6 +107,30 @@ def test_cleanup_deletes_but_detaches_on_process_exit(monkeypatch):
     assert ID.pod_name not in kube.pods
 
 
+def test_fresh_env_creating_a_served_pod_name_marks_recreated():
+    e, kube, _ = _env()
+    assert e.execute("echo hi").get("environment_recreated") is None
+    e.cleanup()                           # gateway stop / degraded eviction: the Pod is deleted
+    assert ID.pod_name not in kube.pods
+    e2, _, _ = _env(kube=kube)
+    assert e2.execute("echo hi")["environment_recreated"] is True
+
+
+def test_fresh_env_adopting_a_served_pod_is_not_recreated():
+    e, kube, _ = _env()
+    e.execute("echo hi")
+    e2, _, _ = _env(kube=kube)
+    assert e2.execute("echo hi").get("environment_recreated") is None
+    assert kube.calls.count(("create", ID.pod_name)) == 1
+
+
+def test_env_is_session_scoped_so_hermes_skips_per_turn_teardown(monkeypatch):
+    from tools import terminal_tool_lifecycle as lc
+    e, _, _ = _env()
+    monkeypatch.setattr(lc, "get_active_env", lambda task_id: e)
+    assert e._session_scoped is True and lc.is_persistent_env("sess-1")
+
+
 def test_last_used_patch_is_throttled():
     e, kube, _ = _env()
     e.ensure_pod()
