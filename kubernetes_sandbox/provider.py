@@ -1,0 +1,2 @@
+class KubernetesProvider:
+    name = "kubernetes"

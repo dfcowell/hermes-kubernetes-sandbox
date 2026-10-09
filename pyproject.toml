@@ -1,0 +1,16 @@
+[project]
+name = "hermes-kubernetes-sandbox"
+version = "0.1.0"
+description = "Kubernetes terminal backend plugin for Hermes Agent"
+license = "MIT"
+requires-python = ">=3.11,<3.14"
+dependencies = []  # runtime deps come from Hermes core: httpx, websockets, PyYAML
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+extend-exclude = [".venv"]

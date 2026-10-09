@@ -1,0 +1,4 @@
+name: kubernetes-sandbox
+version: 0.1.0
+description: Run each Hermes session's commands in its own Kubernetes Pod (optional Docker sidecar; Kata Containers example)
+kind: backend

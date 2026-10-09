@@ -20,3 +20,9 @@ agents can run container-based test suites — instead of on the gateway host.
 ## License
 
 MIT
+
+## Development
+
+    uv venv -p 3.13 .venv
+    uv pip install --python .venv "hermes-agent @ git+https://github.com/NousResearch/hermes-agent@524041b9d0437cd4424a524af4b9e26145e69ab0" pytest==9.1.1 ruff==0.15.10
+    .venv/bin/ruff check . && .venv/bin/pytest

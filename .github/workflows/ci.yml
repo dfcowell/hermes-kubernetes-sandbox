@@ -1,0 +1,20 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv venv -p 3.13 .venv
+      - run: uv pip install --python .venv "hermes-agent @ git+https://github.com/NousResearch/hermes-agent@524041b9d0437cd4424a524af4b9e26145e69ab0" pytest==9.1.1 ruff==0.15.10
+      - run: .venv/bin/ruff check .
+      - run: .venv/bin/pytest -v
+  examples:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: helm/kind-action@v1
+        with:
+          node_image: kindest/node:v1.33.1
+      - run: ./scripts/validate-examples.sh
