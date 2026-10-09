@@ -4,7 +4,7 @@ import threading
 
 import pytest
 from kubernetes_sandbox.exec_stream import (CLOSE, ERROR, STDERR, STDIN, STDOUT, ExecDisconnected, ExecFailed,
-                                            StreamingExecHandle, close_stdin_frame, encode_frame, parse_status)
+                                            StreamingExecHandle, encode_frame, parse_status)
 
 
 class FakeConn:
@@ -38,7 +38,6 @@ def _status(code):
 
 def test_frame_codec():
     assert encode_frame(STDIN, b"hi") == b"\x00hi"
-    assert close_stdin_frame() == bytes([CLOSE, STDIN])
 
 
 def test_parse_status():
@@ -48,13 +47,15 @@ def test_parse_status():
         parse_status(json.dumps({"status": "Failure", "message": "container not found"}).encode())
 
 
-def test_handle_streams_output_and_sends_payload_then_close():
+def test_handle_streams_output_and_never_closes_stdin():
     conn = FakeConn([encode_frame(STDOUT, b"one\n"), encode_frame(STDERR, b"err\n"),
                      encode_frame(STDOUT, b"two\n"), _status(3)], end_with=ConnectionError("closed"))
     h = StreamingExecHandle(lambda: conn, b"PAYLOAD", on_kill=lambda: None)
     assert h.wait(timeout=5) == 3
     assert h.stdout.read() == "one\nerr\ntwo\n"
-    assert conn.sent[0] == encode_frame(STDIN, b"PAYLOAD") and conn.sent[-1] == close_stdin_frame()
+    # Kata drops output written after the exec's stdin is closed: never send a CLOSE frame.
+    assert conn.sent == [encode_frame(STDIN, b"PAYLOAD")]
+    assert not any(f[:1] == bytes([CLOSE]) for f in conn.sent)
     assert h.error is None and conn.closed
 
 
@@ -71,6 +72,7 @@ def test_large_payload_is_chunked():
     StreamingExecHandle(lambda: conn, b"x" * 200_000, on_kill=lambda: None).wait(timeout=5)
     data = b"".join(f[1:] for f in conn.sent if f[:1] == bytes([STDIN]))
     assert data == b"x" * 200_000 and all(len(f) <= 64 * 1024 + 1 for f in conn.sent)
+    assert all(f[:1] == bytes([STDIN]) for f in conn.sent)
 
 
 def test_kill_calls_on_kill_and_closes():

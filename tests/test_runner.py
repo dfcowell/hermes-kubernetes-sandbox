@@ -2,6 +2,7 @@ import os
 import pathlib
 import signal
 import subprocess
+import threading
 import time
 import uuid
 
@@ -10,11 +11,49 @@ import pytest
 from kubernetes_sandbox.runner import exec_argv, kill_argv, stdin_payload
 
 
-def _run(script, stdin_data=None, *, login=False, timeout=30):
+class _Result:
+    def __init__(self, returncode, stdout, stderr, elapsed):
+        self.returncode, self.stdout, self.stderr, self.elapsed = returncode, stdout, stderr, elapsed
+
+
+def _run(script, stdin_data=None, *, login=False, timeout=30, wait=60):
+    """Run the RUNNER like the websocket exec does: write the payload and leave stdin OPEN
+    (the exec's stdin is never closed), wait for the runner to exit, then close stdin."""
     exec_id = uuid.uuid4().hex[:12]
-    argv = exec_argv(exec_id, login=login, timeout=timeout)
-    p = subprocess.run(argv, input=stdin_payload(script, stdin_data), capture_output=True, timeout=60)
-    return p, exec_id
+    proc = subprocess.Popen(exec_argv(exec_id, login=login, timeout=timeout), stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = [], []
+    readers = [threading.Thread(target=lambda f=f, b=b: b.append(f.read()), daemon=True)
+               for f, b in ((proc.stdout, out), (proc.stderr, err))]
+    payload = stdin_payload(script, stdin_data)
+
+    def write():
+        try:
+            proc.stdin.write(payload)
+            proc.stdin.flush()
+        except BrokenPipeError:
+            pass  # the command never read its stdin and the runner already exited
+
+    writer = threading.Thread(target=write, daemon=True)
+    start = time.monotonic()
+    for t in (*readers, writer):
+        t.start()
+    try:
+        rc = proc.wait(timeout=wait)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        raise AssertionError(f"runner did not exit within {wait}s with stdin left open")
+    finally:
+        elapsed = time.monotonic() - start
+        writer.join(5)
+        try:
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+        for t in readers:
+            t.join(5)
+    return _Result(rc, b"".join(out), b"".join(err), elapsed), exec_id
 
 
 def test_runner_exact_script_and_large_stdin():
@@ -48,7 +87,7 @@ def test_runner_records_pgid_and_kill_stops_process_group():
     pgid = None
     try:
         proc.stdin.write(stdin_payload("sleep 300 & sleep 300; echo never", None))
-        proc.stdin.close()
+        proc.stdin.flush()  # stdin stays open, as on the real exec
         for _ in range(50):
             if pgid_file.exists() and pgid_file.read_text().strip():
                 break
@@ -94,3 +133,30 @@ def test_nul_bytes_in_stdin_data_pass_through_exactly():
     assert p.stdout.split() == [b"a", b"\\0", b"b", b"\\0"]
     p, _ = _run("wc -c", "a\0b")
     assert p.stdout.strip() == b"3"
+
+
+def test_stdin_payload_carries_both_lengths():
+    assert stdin_payload("echo ü", "ab") == b"7\n2\necho \xc3\xbcab"
+    assert stdin_payload("true", None) == b"4\n0\ntrue"
+
+
+def test_large_stdin_reaches_command_exactly_and_ends_in_eof():
+    data = "y" * 200_000
+    p, _ = _run("wc -c; echo after-eof", data, wait=20)
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.split() == [b"200000", b"after-eof"]
+
+
+def test_empty_stdin_gives_immediate_eof_with_stdin_open():
+    p, _ = _run("cat; echo done", None, wait=10)
+    assert p.returncode == 0 and p.stdout == b"done\n" and p.elapsed < 5
+
+
+def test_output_written_after_a_delay_is_kept():
+    p, _ = _run("echo one; sleep 0.3; echo two", None, wait=10)
+    assert p.stdout == b"one\ntwo\n"
+
+
+def test_unread_large_stdin_does_not_block_exit():
+    p, _ = _run("exit 7", "q" * 200_000, wait=10)
+    assert p.returncode == 7 and p.elapsed < 5
