@@ -1,0 +1,10 @@
+# Sandbox namespace for the runc, no-Docker mode. Sandbox Pods are unprivileged, so the
+# namespace can enforce the restricted Pod Security profile.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-sandbox
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

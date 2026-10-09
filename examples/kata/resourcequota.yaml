@@ -1,0 +1,18 @@
+# Caps the blast radius of the sandbox namespace: 4 concurrent sessions.
+# Per-session memory (defaults): dind limit 1Gi + work limit 512Mi + RuntimeClass overhead
+# 1024Mi = 2560Mi. The quota counts limits (and requests) including overhead, so 4 sessions
+# need up to 10Gi of requests / 11Gi of limits. Raise these if you raise work_memory,
+# dind_memory or max_per_profile.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: agent-sandbox
+  namespace: agent-sandbox
+spec:
+  hard:
+    pods: "4"
+    requests.cpu: "4"
+    requests.memory: 10Gi
+    limits.memory: 11Gi
+    persistentvolumeclaims: "4"
+    requests.storage: 120Gi

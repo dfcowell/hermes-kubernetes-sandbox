@@ -1,0 +1,10 @@
+# Put the Docker CLI on PATH for login shells inside the work container. The plugin mounts
+# this ConfigMap at /etc/profile.d/docker-cli.sh (name set by `profile_configmap`).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hermes-sandbox-profile
+  namespace: agent-sandbox
+data:
+  docker-cli.sh: |
+    case ":$PATH:" in *:/opt/docker-cli/bin:*) ;; *) PATH="/opt/docker-cli/bin:$PATH"; export PATH ;; esac

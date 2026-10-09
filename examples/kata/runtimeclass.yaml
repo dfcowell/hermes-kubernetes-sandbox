@@ -1,0 +1,18 @@
+# Kata Containers RuntimeClass. Requires a node-level Kata install (see kata-node-config.md).
+#
+# overhead.podFixed is added to every Pod's requests/limits for scheduling and cgroup sizing:
+#   memory 1024Mi = 512 MiB guest base (Kata `default_memory = 512`, the VM's fixed floor)
+#                 + 512 MiB host-side headroom (VMM process, virtiofs/page-cache pressure).
+# Measured: with the default container limits (dind 1Gi + work 512Mi, see resourcequota.yaml)
+# a Pod's cgroup is sized at 2560 MiB; a 3.5 h soak peaked at 1474 / 2560 MiB. A smaller overhead OOM-killed
+# the VM in soak 1.
+# KEEP IN STEP WITH default_memory in the Kata configuration: if you change one, change the other.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata
+handler: kata
+overhead:
+  podFixed:
+    memory: 1024Mi
+    cpu: 250m

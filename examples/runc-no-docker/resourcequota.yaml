@@ -1,0 +1,14 @@
+# Caps the blast radius of the sandbox namespace: 4 concurrent sessions.
+# Per-session (defaults, no Docker): one work container, 512Mi memory limit and 100m CPU
+# request, plus a 10Gi workspace emptyDir. No PVCs, so no storage quota.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: agent-sandbox
+  namespace: agent-sandbox
+spec:
+  hard:
+    pods: "4"
+    requests.cpu: "1"
+    requests.memory: 2Gi
+    limits.memory: 2Gi

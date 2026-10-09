@@ -1,0 +1,16 @@
+# The sandbox namespace. Pod Security `enforce` is PRIVILEGED because the Docker-in-Docker
+# sidecar (`dind`) must run `privileged: true`; neither restricted nor baseline admits that.
+# That is acceptable only because the privileged container lives inside a per-Pod Kata VM,
+# not on the host kernel. The compensating control is the ValidatingAdmissionPolicy in
+# admission-policy.yaml: it admits only Pods with runtimeClassName `kata`, allows
+# `privileged` on the container named `dind` alone, and forbids host namespaces, hostPath,
+# hostPort and service-account tokens. Do not apply this namespace without that policy.
+# `audit`/`warn` stay restricted so deviations from the strict profile are always visible.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-sandbox
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

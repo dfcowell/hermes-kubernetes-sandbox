@@ -1,0 +1,57 @@
+# Sandboxes may resolve DNS and reach the public internet on 80/443 only. Nothing reaches
+# them (kubectl exec goes API server -> kubelet, not over the Pod network, so no ingress is needed).
+# Unreachable by omission: the API server, nodes, the LAN, every other namespace.
+#
+# This is the portable networking.k8s.io/v1 form. It works with any CNI that enforces NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-egress
+  namespace: agent-sandbox
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  # No ingress rules: deny all ingress.
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - {port: 53, protocol: UDP}
+        - {port: 53, protocol: TCP}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16]
+      ports:
+        - {port: 443, protocol: TCP}
+        - {port: 80, protocol: TCP}
+# ---------------------------------------------------------------------------
+# Cilium variant (stricter: pins DNS to kube-dns and adds explicit default-deny):
+#
+# apiVersion: cilium.io/v2
+# kind: CiliumNetworkPolicy
+# metadata:
+#   name: sandbox-egress
+#   namespace: agent-sandbox
+# spec:
+#   endpointSelector: {}
+#   enableDefaultDeny: {ingress: true, egress: true}
+#   egress:
+#     - toEndpoints:
+#         - matchLabels:
+#             k8s:io.kubernetes.pod.namespace: kube-system
+#             k8s-app: kube-dns
+#       toPorts:
+#         - ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}]
+#     - toCIDRSet:
+#         - cidr: 0.0.0.0/0
+#           except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16]
+#       toPorts:
+#         - ports: [{port: "443", protocol: TCP}, {port: "80", protocol: TCP}]
+#
+# MANDATORY with Cilium: set `socketLB.hostNamespaceOnly: true` in the Cilium Helm values.
+# Without it, socket-level load balancing happens inside the Kata guest's host-side socket
+# view and Service traffic from Kata VMs bypasses/breaks policy enforcement.
+# ---------------------------------------------------------------------------

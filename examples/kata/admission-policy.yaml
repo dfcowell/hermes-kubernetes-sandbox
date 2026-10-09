@@ -1,0 +1,50 @@
+# Compensating control for the privileged namespace (see namespace.yaml). Requires Kubernetes >= 1.30
+# (ValidatingAdmissionPolicy GA). Applies to Pods in `agent-sandbox` only.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: agent-sandbox-pods
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  validations:
+    - expression: "has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'kata'"
+      message: "agent-sandbox pods must set runtimeClassName kata"
+    - expression: "!has(object.spec.volumes) || object.spec.volumes.all(v, !has(v.hostPath))"
+      message: "hostPath volumes are forbidden in agent-sandbox"
+    - expression: "!has(object.spec.hostNetwork) || !object.spec.hostNetwork"
+      message: "hostNetwork is forbidden in agent-sandbox"
+    - expression: "!has(object.spec.hostPID) || !object.spec.hostPID"
+      message: "hostPID is forbidden in agent-sandbox"
+    - expression: "!has(object.spec.hostIPC) || !object.spec.hostIPC"
+      message: "hostIPC is forbidden in agent-sandbox"
+    - expression: >-
+        object.spec.containers.all(c, !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0)) &&
+        (!has(object.spec.initContainers) || object.spec.initContainers.all(c, !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0)))
+      message: "hostPort is forbidden in agent-sandbox"
+    - expression: "has(object.spec.automountServiceAccountToken) && !object.spec.automountServiceAccountToken"
+      message: "agent-sandbox pods must set automountServiceAccountToken: false"
+    - expression: >-
+        !has(object.metadata.annotations) || object.metadata.annotations.all(k, !k.startsWith('io.katacontainers.'))
+      message: "io.katacontainers.* annotations (which override the VM configuration) are forbidden"
+    - expression: >-
+        object.spec.containers.all(c, c.name == 'dind' || !has(c.securityContext) || !has(c.securityContext.privileged) || !c.securityContext.privileged) &&
+        (!has(object.spec.initContainers) || object.spec.initContainers.all(c, !has(c.securityContext) || !has(c.securityContext.privileged) || !c.securityContext.privileged))
+      message: "privileged is allowed only on the container named dind"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: agent-sandbox-pods
+spec:
+  policyName: agent-sandbox-pods
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: agent-sandbox
