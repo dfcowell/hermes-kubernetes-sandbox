@@ -19,6 +19,10 @@ import sys
 import tempfile
 import time
 
+# Run as documented (from the repo root, no PYTHONPATH), sys.path[0] is scripts/; the plugin
+# package lives in the repo root.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
 
 def main(argv: list[str]) -> int:
     if len(argv) != 2 or argv[1] in ("-h", "--help"):
@@ -50,6 +54,13 @@ def main(argv: list[str]) -> int:
         r = env.execute("echo ready")  # first execute creates the Pod and builds the snapshot
         check("pod ready + session snapshot + first command",
               r["returncode"] == 0 and "ready" in r["output"], f"{time.time() - t0:.1f}s")
+        r = env.execute("echo one; sleep 0.5; echo two")
+        check("late output survives (stdin never closed)",
+              r["returncode"] == 0 and "one" in r["output"] and "two" in r["output"],
+              r["output"].strip()[:100])
+        env.execute("cd /tmp")
+        check("cwd tracked", env.cwd == "/tmp", f"cwd={env.cwd}")
+        env.execute("cd /workspace")
         env.execute("mkdir -p sub && cd sub && export E2E=yes")
         r = env.execute('echo "$E2E $(pwd)"; a=(x y); echo ${a[1]} {1..3}')
         check("cd/export persist; real bash",
@@ -88,10 +99,12 @@ def main(argv: list[str]) -> int:
               "" if gone else "still alive after ~3 s")
         env._client.delete_pod(env._id.pod_name, grace_seconds=0)
         env._wait_gone(env._id.pod_name)
-        r = env.execute("echo back")
-        check("recreated after deletion",
-              "back" in r["output"] and r.get("environment_recreated") is True,
-              f"returncode={r.get('returncode')} environment_recreated={r.get('environment_recreated')}")
+        r = env.execute("echo back")  # cwd is /workspace/sub: the new Pod must recreate it
+        check("recreated after deletion, cwd kept",
+              r["returncode"] == 0 and "back" in r["output"] and r.get("environment_recreated") is True
+              and env.cwd == "/workspace/sub",
+              f"returncode={r.get('returncode')} environment_recreated={r.get('environment_recreated')} "
+              f"cwd={env.cwd}")
     except Exception as e:  # report, don't leak payloads
         check("unexpected error", False, type(e).__name__ + ": " + str(e)[:200])
     finally:
