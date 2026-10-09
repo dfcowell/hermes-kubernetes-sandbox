@@ -1,4 +1,5 @@
 import copy
+import uuid
 
 from kubernetes_sandbox.kube import NotFound, QuotaExceeded
 
@@ -28,6 +29,7 @@ class FakeKube:
         if self.quota is not None and len(self.pods) >= self.quota:
             raise QuotaExceeded(403, "Forbidden", "exceeded quota: sandbox-capacity")
         pod = copy.deepcopy(manifest)
+        pod["metadata"]["uid"] = str(uuid.uuid4())
         pod["status"] = {"phase": "Pending"}
         self.pods[manifest["metadata"]["name"]] = pod
         self._gets[manifest["metadata"]["name"]] = 0
