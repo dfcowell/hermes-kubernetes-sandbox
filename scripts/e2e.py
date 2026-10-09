@@ -68,6 +68,9 @@ def main(argv: list[str]) -> int:
         big = "z" * 2_000_000
         r = env.execute("wc -c", stdin_data=big)
         check("2 MB stdin exact", r["output"].strip().endswith(str(len(big))), r["output"].strip()[-40:])
+        r = env.execute("exit 3", stdin_data="u" * 8_000_000)
+        check("8 MB stdin, command never reads it: real exit code", r["returncode"] == 3,
+              f"returncode={r['returncode']}")
         r = env.execute("exit 9")
         check("exit code", r["returncode"] == 9, f"returncode={r['returncode']}")
         if s.docker:
@@ -89,17 +92,24 @@ def main(argv: list[str]) -> int:
         elapsed = time.time() - t0
         check("timeout returns promptly with returncode 124", elapsed < 30 and r["returncode"] == 124,
               f"{elapsed:.1f}s returncode={r['returncode']}")
+        pid_ok = env.execute('test -s /tmp/e2e-sleeper.pid && echo present')["output"].strip().endswith("present")
+        check("sleeper pidfile written (so 'gone' below means killed)", pid_ok)
         gone = False
         for _ in range(7):  # remote kill escalates TERM -> KILL within ~2 s
             if not alive("/tmp/e2e-sleeper.pid"):
                 gone = True
                 break
             time.sleep(0.5)
-        check("timeout killed remote process", gone and control_ok,
+        check("timeout killed remote process", gone and control_ok and pid_ok,
               "" if gone else "still alive after ~3 s")
         env._client.delete_pod(env._id.pod_name, grace_seconds=0)
         env._wait_gone(env._id.pod_name)
-        r = env.execute("echo back")  # cwd is /workspace/sub: the new Pod must recreate it
+        # timeout=10 is far shorter than a Kata cold start: the recreate must happen before the
+        # command's bounded wait starts, never inside it (no synthetic 124).
+        t0 = time.time()
+        r = env.execute("echo back", timeout=10)  # cwd is /workspace/sub: the new Pod must recreate it
+        check("recreate is outside the command timeout (no synthetic 124)", r.get("returncode") != 124,
+              f"returncode={r.get('returncode')} after {time.time() - t0:.1f}s")
         check("recreated after deletion, cwd kept",
               r["returncode"] == 0 and "back" in r["output"] and r.get("environment_recreated") is True
               and env.cwd == "/workspace/sub",
