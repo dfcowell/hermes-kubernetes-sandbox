@@ -5,6 +5,8 @@ import subprocess
 import time
 import uuid
 
+import pytest
+
 from kubernetes_sandbox.runner import exec_argv, kill_argv, stdin_payload
 
 
@@ -79,3 +81,16 @@ def test_runner_timeout_backstop():
     start = time.time()
     p, _ = _run("sleep 30", timeout=1)
     assert p.returncode in (124, 137) and time.time() - start < 15
+
+
+def test_stdin_payload_rejects_nul_in_script():
+    with pytest.raises(ValueError, match="NUL"):
+        stdin_payload("echo a\0b; cat", "STDIN")
+
+
+def test_nul_bytes_in_stdin_data_pass_through_exactly():
+    p, _ = _run("od -An -c", "a\0b\0")
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.split() == [b"a", b"\\0", b"b", b"\\0"]
+    p, _ = _run("wc -c", "a\0b")
+    assert p.stdout.strip() == b"3"

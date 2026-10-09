@@ -28,6 +28,8 @@ def exec_argv(exec_id: str, *, login: bool, timeout: int) -> list[str]:
 
 
 def stdin_payload(script: str, stdin_data: str | None) -> bytes:
+    if "\0" in script:
+        raise ValueError("script contains a NUL byte, which bash cannot execute")
     body = script.encode("utf-8")
     return f"{len(body)}\n".encode() + body + (stdin_data or "").encode("utf-8")
 
