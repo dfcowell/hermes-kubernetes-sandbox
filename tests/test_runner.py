@@ -160,3 +160,97 @@ def test_output_written_after_a_delay_is_kept():
 def test_unread_large_stdin_does_not_block_exit():
     p, _ = _run("exit 7", "q" * 200_000, wait=10)
     assert p.returncode == 7 and p.elapsed < 5
+
+
+def _run_no_reader(script, data: bytes, *, watchdog=60):
+    """Write the whole payload SYNCHRONOUSLY before reading any output and never close stdin
+    until the runner exits: the runner must drain stdin itself whether or not the command reads
+    it. A watchdog kills the runner if the write or the wait deadlocks."""
+    exec_id = uuid.uuid4().hex[:12]
+    proc = subprocess.Popen(exec_argv(exec_id, login=False, timeout=60), stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    fired = threading.Event()
+
+    def bark():
+        fired.set()
+        proc.kill()
+
+    dog = threading.Timer(watchdog, bark)
+    dog.start()
+    try:
+        body = script.encode()
+        proc.stdin.write(f"{len(body)}\n{len(data)}\n".encode() + body + data)
+        proc.stdin.flush()  # stdin stays open, as on the real exec
+        out = proc.stdout.read()
+        err = proc.stderr.read()
+        rc = proc.wait()
+    finally:
+        dog.cancel()
+        try:
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+    assert not fired.is_set(), "runner deadlocked (watchdog fired)"
+    return rc, out, err, exec_id
+
+
+EIGHT_MB = bytes(range(256)) * (8 * 1024 * 1024 // 256)
+
+
+def test_8mb_stdin_unread_command_gets_its_real_exit_code():
+    rc, _, err, exec_id = _run_no_reader("exit 3", EIGHT_MB)
+    assert rc == 3, err
+    assert not list(pathlib.Path("/tmp").glob(f"hermes-exec-{exec_id}.*"))  # spool + markers removed
+
+
+def test_8mb_stdin_cat_with_no_concurrent_reader_is_exact():
+    import hashlib
+    rc, out, err, _ = _run_no_reader("cat", EIGHT_MB)
+    assert rc == 0, err
+    assert len(out) == len(EIGHT_MB) and hashlib.sha256(out).digest() == hashlib.sha256(EIGHT_MB).digest()
+
+
+def test_spooled_stdin_file_is_private():
+    rc, out, err, _ = _run_no_reader("stat -L -c %a /proc/self/fd/0", b"secret")
+    assert rc == 0, err
+    assert out.strip() == b"600"
+
+
+def test_tombstone_present_means_the_command_never_runs(tmp_path):
+    exec_id = uuid.uuid4().hex[:12]
+    tomb = pathlib.Path(f"/tmp/hermes-exec-{exec_id}.killed")
+    marker = tmp_path / "ran"
+    tomb.touch()
+    try:
+        proc = subprocess.Popen(exec_argv(exec_id, login=False, timeout=30), stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc.stdin.write(stdin_payload(f"touch {marker}", "x"))
+        proc.stdin.flush()
+        assert proc.wait(timeout=10) == 137
+        proc.stdin.close()
+        assert not marker.exists() and not tomb.exists()
+    finally:
+        tomb.unlink(missing_ok=True)
+
+
+def test_kill_during_spooling_stops_the_command_before_it_starts(tmp_path):
+    exec_id = uuid.uuid4().hex[:12]
+    marker = tmp_path / "ran"
+    script = f"touch {marker}; cat >/dev/null".encode()
+    proc = subprocess.Popen(exec_argv(exec_id, login=False, timeout=30), stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        proc.stdin.write(f"{len(script)}\n10\n".encode() + script + b"12345")  # half the stdin
+        proc.stdin.flush()
+        time.sleep(0.3)
+        subprocess.run(kill_argv(exec_id), check=True, timeout=10)  # no pgid yet: tombstone only
+        proc.stdin.write(b"67890")
+        proc.stdin.flush()
+        assert proc.wait(timeout=10) == 137
+        assert not marker.exists()
+        assert not list(pathlib.Path("/tmp").glob(f"hermes-exec-{exec_id}.*"))
+    finally:
+        proc.kill()
+        proc.wait()
+        pathlib.Path(f"/tmp/hermes-exec-{exec_id}.killed").unlink(missing_ok=True)
+

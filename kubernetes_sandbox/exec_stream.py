@@ -5,7 +5,12 @@ The exec's stdin is never closed (no CLOSE frame on channel 255): on Kata 3.28 /
 the close (dev cluster, `echo one; sleep 0.3; echo two` x5: 0/5 got "two" with stdin closed, 5/5
 with it left open; the server sends "one", then the channel-3 status, then hangs up). The runner
 (runner.py) delimits the caller's stdin in-band instead; the connection is closed only after the
-status frame arrives."""
+status frame arrives.
+
+The whole payload is sent before any output is read. That cannot deadlock: the runner spools all
+of the caller's stdin to a file before it starts the command, so nothing is written to stdout
+until the upload is complete (websockets' sync client holds one mutex across send and recv, so a
+concurrent sender thread would not help)."""
 from __future__ import annotations
 
 import json
@@ -80,6 +85,9 @@ class StreamingExecHandle:
                 self._returncode = 137
                 return
             for i in range(0, len(payload), _CHUNK):
+                if self._killed.is_set():  # stop uploading; the runner's tombstone check does the rest
+                    self._returncode = 137
+                    return
                 conn.send(encode_frame(STDIN, payload[i:i + _CHUNK]))
             # Deliberately no close-stdin frame: see the module docstring.
             while True:

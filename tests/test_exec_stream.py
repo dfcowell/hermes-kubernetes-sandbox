@@ -128,3 +128,22 @@ def test_blocking_on_kill_does_not_block_kill():
     assert ran.wait(2)
     release.set()
     assert h.wait(timeout=5) == 137
+
+
+def test_kill_mid_send_stops_sending():
+    started = threading.Event()
+
+    class SlowSend(FakeConn):
+        def send(self, data):
+            started.set()
+            threading.Event().wait(0.05)
+            super().send(data)
+
+    conn = SlowSend([], end_with=None)
+    payload = b"x" * (64 * 1024 * 100)  # 100 chunks, ~5 s at 50 ms each
+    h = StreamingExecHandle(lambda: conn, payload, on_kill=lambda: None)
+    assert started.wait(2)
+    h.kill()
+    assert h.wait(timeout=2) == 137
+    assert len(conn.sent) < 10 and conn.closed
+    assert h.error is None
