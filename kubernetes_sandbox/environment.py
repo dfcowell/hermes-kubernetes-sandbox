@@ -4,6 +4,7 @@ from __future__ import annotations
 import atexit
 import datetime as dt
 import os
+import shlex
 import socket
 import threading
 import time
@@ -55,6 +56,7 @@ class KubernetesEnvironment(BaseEnvironment):
     def __init__(self, *, settings: Settings, identity: Identity, cwd: str, timeout: int,
                  client=None, exec_connect=None, clock=time.time, sleep=time.sleep):
         super().__init__(cwd=cwd or "/workspace", timeout=timeout)
+        self._initial_cwd = self.cwd
         self._s, self._id = settings, identity
         self._client = client or KubeClient(settings)
         self._exec = exec_connect or _default_exec_connect(self._client)
@@ -138,14 +140,32 @@ class KubernetesEnvironment(BaseEnvironment):
             self._snapshot_ready = False  # the snapshot lives in the Pod's /tmp
             if self._had_pod:
                 self._mark_recreated()
+            recreated = self._had_pod
             self._notify("starting sandbox Pod")
             self._wait_ready(name)
             self._pod_ready = self._had_pod = True
             self._last_touch = self._clock()
+            if recreated:
+                self._restore_cwd()
             return
         raise EnvironmentConnectionError(
             f"Could not create sandbox Pod {name}: it keeps conflicting with an existing Pod",
             retry_hint="Retry the command.")
+
+    def _restore_cwd(self) -> None:
+        """A fresh Pod lacks the old cwd unless it was on persisted storage; recreate it, as
+        `docker run -w <cwd>` does for the docker backend. Best effort: on any failure fall back
+        to the cwd the environment was constructed with."""
+        try:
+            handle = self._start(f"mkdir -p -- {shlex.quote(self.cwd)}", False, 15, None)
+            rc = handle.wait(timeout=20)
+            if rc is None:
+                handle.kill()
+            ok = rc == 0 and getattr(handle, "error", None) is None
+        except Exception:
+            ok = False
+        if not ok:
+            self.cwd = self._initial_cwd
 
     def _wait_ready(self, name: str) -> None:
         deadline = self._clock() + self._s.ready_timeout_seconds

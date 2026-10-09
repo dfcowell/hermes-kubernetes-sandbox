@@ -302,4 +302,62 @@ def test_session_snapshot_bootstrapped_lazily_and_again_after_recreate():
     e._pod_ready = False
     n = len(ex.runs)
     e.execute("echo hi")
-    assert ex.runs[n]["argv"][-2] == "1"            # bootstrap again in the new Pod
+    assert b"mkdir -p -- /workspace" in ex.runs[n]["payload"]  # cwd restored first (non-login)
+    assert ex.runs[n]["argv"][-2] == "0"
+    assert ex.runs[n + 1]["argv"][-2] == "1"        # bootstrap again in the new Pod
+
+
+def _mkdir_runs(ex, path):
+    return [r for r in ex.runs if f"mkdir -p -- {path}".encode() in r["payload"]]
+
+
+def test_recreate_keeps_cwd_by_creating_it_in_the_new_pod():
+    e, kube, ex = _env()
+    e.ensure_pod()
+    assert _mkdir_runs(ex, "/workspace") == []      # first Pod: nothing to restore
+    e.cwd = "/workspace/sub"
+    kube.pods.clear()
+    e._pod_ready = False
+    e.ensure_pod()
+    runs = _mkdir_runs(ex, "/workspace/sub")
+    assert len(runs) == 1 and runs[0]["container"] == "work"
+    assert e.cwd == "/workspace/sub"
+
+
+def test_recreate_falls_back_to_initial_cwd_when_mkdir_fails():
+    import json
+
+    from kubernetes_sandbox.exec_stream import ERROR, StreamingExecHandle, encode_frame
+
+    inner = FakeExec()
+
+    class FailConn:
+        def __init__(self):
+            self.frames = [encode_frame(ERROR, json.dumps({"status": "Failure", "details": {
+                "causes": [{"reason": "ExitCode", "message": "1"}]}}).encode())]
+
+        def send(self, d):
+            pass
+
+        def recv(self, timeout=None):
+            if self.frames:
+                return self.frames.pop(0)
+            raise ConnectionError("closed")
+
+        def close(self):
+            pass
+
+    def ex(pod, container, argv, payload, on_kill):
+        if b"mkdir -p -- " in payload:
+            inner.runs.append({"payload": payload})
+            return StreamingExecHandle(lambda: FailConn(), payload, on_kill)
+        return inner(pod, container, argv, payload, on_kill)
+
+    e, kube, _ = _env(ex=ex)
+    e.ensure_pod()
+    e.cwd = "/read-only/sub"
+    kube.pods.clear()
+    e._pod_ready = False
+    e.ensure_pod()
+    assert len(_mkdir_runs(inner, "/read-only/sub")) == 1
+    assert e.cwd == "/workspace"
