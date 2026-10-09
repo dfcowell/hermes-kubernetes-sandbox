@@ -1,5 +1,11 @@
 # Compensating control for the privileged namespace (see namespace.yaml). Requires Kubernetes >= 1.30
 # (ValidatingAdmissionPolicy GA). Applies to Pods in `agent-sandbox` only.
+#
+# Deliberately NOT restricted here: capabilities.add on containers other than dind, inline csi/nfs
+# volumes, and ephemeral containers. That is acceptable because the Kata VM is the isolation
+# boundary (privilege inside the guest does not reach the host kernel), and the only non-admin
+# identity that can create Pods here is the driver ServiceAccount (rbac.yaml grants no
+# pods/ephemeralcontainers), which only creates the Pods the plugin renders.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:

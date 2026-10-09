@@ -23,6 +23,8 @@ Run the Hermes Pod as `hermes-sandbox-driver` with a projected token, as describ
 `kubernetes-sandbox.yaml` into `$HERMES_HOME`, and set `terminal.backend: kubernetes`. This example
 uses the namespace `agent-sandbox-runc` so it can coexist with the Kata example.
 
-There is no janitor here: the plugin deletes its Pod when a session ends and Pods carry a
-`max_lifetime_seconds` annotation, but if you want the safety net for crashed gateways, reuse
-`../kata/janitor.yaml` (set `NAMESPACE=agent-sandbox-runc` and add a janitor ServiceAccount, Role and RoleBinding for that namespace, like the ones in `../kata/rbac.yaml`).
+The plugin deletes its Pod when Hermes ends the session, but Pods of a crashed or stopped
+gateway, and Pods past `max_lifetime_seconds`, are only reaped by the janitor (it is what
+enforces the max-lifetime annotation). Run it here too: reuse `../kata/janitor.yaml` with
+`NAMESPACE=agent-sandbox-runc`, plus a janitor ServiceAccount, Role and RoleBinding for that
+namespace like the ones in `../kata/rbac.yaml`.

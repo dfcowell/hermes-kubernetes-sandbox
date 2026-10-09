@@ -1,5 +1,6 @@
 # Reaps idle, expired and finished sandbox Pods. The ConfigMap is GENERATED from
 # janitor/janitor.py by `scripts/validate-examples.sh --render-janitor`; do not edit it by hand.
+# metadata.namespace (here and on the CronJob): change `hermes` to your Hermes namespace.
 apiVersion: v1
 kind: ConfigMap
 metadata:

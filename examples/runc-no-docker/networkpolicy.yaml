@@ -56,8 +56,4 @@ spec:
 #           except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10]
 #       toPorts:
 #         - ports: [{port: "443", protocol: TCP}, {port: "80", protocol: TCP}]
-#
-# MANDATORY with Cilium: set `socketLB.hostNamespaceOnly: true` in the Cilium Helm values.
-# Without it, socket-level load balancing happens inside the Kata guest's host-side socket
-# view and Service traffic from Kata VMs bypasses/breaks policy enforcement.
 # ---------------------------------------------------------------------------

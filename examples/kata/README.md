@@ -9,13 +9,14 @@ not exposed. This is the recommended deployment when agents need `docker`.
 - Kubernetes >= 1.30 (ValidatingAdmissionPolicy).
 - The default `docker_cli: image-volume` needs the `ImageVolume` feature enabled in your cluster and a
   CRI that supports it (containerd >= 2.1 or CRI-O); verified on Kubernetes 1.36 with containerd 2.2.3.
-  Otherwise set `docker_cli: init-copy`.
+  Otherwise (for example on Kubernetes < 1.33, where image volumes are unavailable) set
+  `docker_cli: init-copy`.
 - Kata Containers with **Cloud Hypervisor** on the sandbox nodes, configured as in
   [kata-node-config.md](kata-node-config.md) (not optional).
 - A StorageClass that provisions **Block** volumes (`volumeMode: Block`, access mode `ReadWriteOncePod`); the Docker disk is a
   generic ephemeral volume that lives and dies with the Pod.
-- A CNI that enforces NetworkPolicy. With Cilium, `socketLB.hostNamespaceOnly: true` is mandatory
-  (see networkpolicy.yaml).
+- A CNI that enforces NetworkPolicy. With Cilium, `socketLB.hostNamespaceOnly: true` is mandatory:
+  without it Service connectivity from Kata Pods breaks (see networkpolicy.yaml).
 
 ## Apply order
 
@@ -78,7 +79,14 @@ For a gateway running **outside the cluster**, mint a bounded token and write it
 hermes-sandbox-driver`). It never expires, is not bound to the Pod, and anyone who can read Secrets in
 that namespace can use it. Prefer the projected token above.
 
-## First manual janitor run
+## Janitor
+
+`janitor.yaml` reaps sandbox Pods left behind by a crashed or stopped gateway, idle Pods
+(`IDLE_SECONDS`), finished Pods and Pods past `max_lifetime_seconds` (the janitor is what
+enforces that annotation). Set `NAMESPACE` to your sandbox namespace and the CronJob/ConfigMap
+namespace to your Hermes namespace.
+
+### First manual janitor run
 
 ```sh
 kubectl -n hermes create job --from=cronjob/hermes-sandbox-janitor janitor-first-run

@@ -1,7 +1,9 @@
 # Kata node configuration
 
-Three node-level settings are required (two in Kata, one in containerd). Both were established by the spike that preceded this
-plugin; skipping either causes VM out-of-memory kills under real load.
+Three node-level settings are required: two in the Kata configuration (sections 1 and 2) and one
+in containerd's CRI configuration (section 3). All three were established by the spike that
+preceded this plugin. Skipping 1 or 2 causes VM out-of-memory kills under real load; skipping 3
+passes every host device into the VM and voids the isolation claim.
 
 ## 1. `default_memory = 512`
 
@@ -46,8 +48,9 @@ privileged_without_host_devices_all_devices_allowed = true
 
 ## Applying it
 
-Both options go in the Kata `configuration.toml` for the runtime you register. Do not edit the
-file shipped inside the Kata release; use a copy or a drop-in so upgrades do not silently revert it.
+Settings 1 and 2 go in the Kata `configuration.toml` for the runtime you register; setting 3 goes
+in containerd's CRI runtime entry for `kata`. Do not edit the Kata file shipped inside the release;
+use a copy or a drop-in so upgrades do not silently revert it.
 
 A change to the CRI configuration or to the Kata configuration needs containerd to restart (on
 Talos, a node reboot; the spike applied it with a reboot). It then applies to newly started Pods.

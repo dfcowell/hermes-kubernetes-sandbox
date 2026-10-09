@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # Validate every example manifest against a live API server.
-#   (no flag)         read-only: server-side dry run of every manifest; only creates the
-#                     namespaces it needs if they are missing. Safe against a real cluster.
+#   (no flag)         read-only: server-side dry run of every manifest. Creates nothing: the
+#                     namespaces must already exist. Safe against a real cluster.
 #   --apply           THROWAWAY CLUSTERS ONLY (CI kind): applies the example manifests for real,
 #                     then server-side dry-runs the Pods the plugin itself renders from the sample
 #                     settings (both docker_cli modes into the Kata namespace, docker: false into
 #                     the runc namespace). Any admission rejection fails the run.
 #   --render-janitor  regenerates examples/kata/janitor.yaml's ConfigMap from janitor/janitor.py.
+# PYTHON: an interpreter with PyYAML (CI: a uv venv); the plugin itself is imported from the repo.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+PYTHON="${PYTHON:-python3}"
 render_janitor() {
-  python3 - <<'PY'
+  "$PYTHON" - <<'PY'
 import pathlib, yaml
 yaml.SafeDumper.add_representer(
     str, lambda d, v: d.represent_scalar("tag:yaml.org,2002:str", v, style="|" if "\n" in v else None))
@@ -35,10 +37,15 @@ before="$(mktemp)"
 trap 'rm -f "$before"' EXIT
 cp examples/kata/janitor.yaml "$before"
 render_janitor
-diff -q "$before" examples/kata/janitor.yaml || { echo "janitor ConfigMap drifted: run --render-janitor"; exit 1; }
+if ! diff -q "$before" examples/kata/janitor.yaml >/dev/null; then
+  cp "$before" examples/kata/janitor.yaml   # a check must not edit the tree
+  echo "janitor ConfigMap drifted from janitor/janitor.py: run $0 --render-janitor"
+  exit 1
+fi
 rc=0
 mode="${1:-}"
 if [ -n "$mode" ] && [ "$mode" != "--apply" ]; then echo "usage: $0 [--apply|--render-janitor]"; exit 2; fi
+echo "kube context: $(kubectl config current-context)"
 
 if [ "$mode" = "--apply" ]; then
   # namespace first; the VAP before any Pod is created; hermes namespace for the janitor/RBAC objects.
@@ -54,10 +61,25 @@ if [ "$mode" = "--apply" ]; then
     case "$f" in */kubernetes-sandbox.yaml|*/namespace.yaml) continue ;; esac
     kubectl apply -f "$f" >/dev/null && echo "applied $f" || { echo "FAIL $f"; rc=1; }
   done
-  sleep 5   # let the admission policy binding take effect
+  # Positive controls instead of a sleep: the VAP binding and the quota take effect
+  # asynchronously, and a dry run before then would pass for the wrong reason.
+  wait_for() {  # wait_for <what> <command...>: retry for up to 60 s
+    local what="$1"; shift
+    for _ in $(seq 60); do "$@" && { echo "ok   $what"; return 0; }; sleep 1; done
+    echo "FAIL $what (not in effect after 60 s)"; return 1
+  }
+  vap_rejects() {  # rejected BY THE POLICY (quota or PSA rejections do not count)
+    kubectl -n agent-sandbox run vap-probe --image=busybox --restart=Never --dry-run=server \
+        --overrides='{"spec":{"automountServiceAccountToken":false}}' 2>&1 \
+      | grep -q "must set runtimeClassName kata"
+  }
+  quota_ready() { [ -n "$(kubectl -n "$1" get resourcequota -o jsonpath='{.items[*].status.hard}')" ]; }
+  wait_for "admission policy rejects a Pod without runtimeClassName" vap_rejects || exit 1
+  wait_for "ResourceQuota agent-sandbox enforced" quota_ready agent-sandbox || exit 1
+  wait_for "ResourceQuota agent-sandbox-runc enforced" quota_ready agent-sandbox-runc || exit 1
   # Render real Pods with the plugin from the sample settings and dry-run them.
   render() {  # render <example dir> <docker_cli>
-    PYTHONPATH=. python3 - "$1" "$2" <<'PY'
+    PYTHONPATH=. "$PYTHON" - "$1" "$2" <<'PY'
 import dataclasses, json, pathlib, sys, tempfile
 from kubernetes_sandbox.naming import Identity
 from kubernetes_sandbox.podspec import render_pod
@@ -81,7 +103,11 @@ PY
 fi
 
 # Read-only default. Namespaced objects need their namespace to exist for a server-side dry run.
-for ns in hermes agent-sandbox agent-sandbox-runc; do kubectl get ns "$ns" >/dev/null 2>&1 || kubectl create ns "$ns"; done
+for ns in hermes agent-sandbox agent-sandbox-runc; do
+  kubectl get ns "$ns" >/dev/null 2>&1 || {
+    echo "missing namespace $ns (create it, or use --apply on a throwaway cluster)"; rc=1; }
+done
+[ "$rc" = 0 ] || exit "$rc"
 for dir in examples/kata examples/runc-no-docker; do
   for f in "$dir"/*.yaml; do
     case "$f" in */kubernetes-sandbox.yaml) continue ;; esac

@@ -7,6 +7,8 @@
 # a Pod's cgroup is sized at 2560 MiB; a 3.5 h soak peaked at 1474 / 2560 MiB. A smaller overhead OOM-killed
 # the VM in soak 1.
 # KEEP IN STEP WITH default_memory in the Kata configuration: if you change one, change the other.
+# If only some nodes run Kata, add `scheduling: {nodeSelector: {<label>: <value>}}` (and
+# tolerations if those nodes are tainted) so sandbox Pods are only scheduled where the handler exists.
 apiVersion: node.k8s.io/v1
 kind: RuntimeClass
 metadata:
