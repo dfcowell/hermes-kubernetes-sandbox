@@ -325,7 +325,7 @@ def pvc(name="ws", uid="uid-ws", unused_age=None, retention=None, deletion_ts=No
         ann[UNUSED] = unused_raw
     if retention is not None:
         ann[RETENTION] = retention
-    c = {"metadata": {"name": name, "uid": uid, "annotations": ann,
+    c = {"metadata": {"name": name, "uid": uid, "resourceVersion": "rv-" + name, "annotations": ann,
                       "labels": {"app.kubernetes.io/managed-by": "hermes-kubernetes-sandbox",
                                  "app.kubernetes.io/component": "workspace"}}}
     if deletion_ts:
@@ -430,7 +430,8 @@ def test_main_pvc_pass_stamps_unstamps_and_deletes():
         ("PATCH", base + "ws-mounted", {"metadata": {"annotations": {UNUSED: None}}}, merge),
         ("PATCH", base + "ws-new", {"metadata": {"annotations": {UNUSED: janitor.iso(NOW)}}}, merge),
         ("PATCH", base + "ws-finished", {"metadata": {"annotations": {UNUSED: janitor.iso(NOW)}}}, merge),
-        ("DELETE", base + "ws-expired", {"preconditions": {"uid": "uid-exp"}}, "application/json"),
+        ("DELETE", base + "ws-expired", {"preconditions": {"uid": "uid-exp", "resourceVersion": "rv-ws-expired"}},
+         "application/json"),
     ]
     assert any("skip ws-dying: terminating" in line for line in output)
     assert any("keep ws-fresh" in line for line in output)
@@ -491,3 +492,19 @@ def test_api_sends_the_given_content_type():
     with patch.object(janitor.urllib.request, "urlopen", fake_urlopen):
         janitor._api("PATCH", "/x", None, "tok", {"a": None}, content_type="application/merge-patch+json")
     assert seen == {"ctype": "application/merge-patch+json", "method": "PATCH"}
+
+
+def test_decide_pvc_future_unused_since_is_malformed_and_restamped():
+    assert janitor.decide_pvc(pvc(unused_age=-3600, retention="1"), False, NOW, WEEK) == "stamp"
+    assert janitor.decide_pvc(pvc(unused_age=0, retention="1"), False, NOW, WEEK) is None
+
+
+def test_main_pvc_changed_since_listing_is_skipped_benignly():
+    """The plugin cleared the stamp (new resourceVersion) after the janitor listed: 409, not an error."""
+    pvcs = [pvc("ws-revived", uid="u", unused_age=WEEK + 60)]
+    fail = {("DELETE", "ws-revived"): urllib.error.HTTPError(None, 409, "Conflict", {}, None)}
+    rc, calls, output = run_main([], pvcs, fail=fail)
+    body = [c[2] for c in calls if c[0] == "DELETE"][0]
+    assert body == {"preconditions": {"uid": "u", "resourceVersion": "rv-ws-revived"}}
+    assert any("skip ws-revived: changed" in line for line in output)
+    assert rc == 0

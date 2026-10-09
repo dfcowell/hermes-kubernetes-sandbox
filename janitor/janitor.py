@@ -78,7 +78,7 @@ def decide_pvc(pvc: dict, mounted: bool, now: float, default_retention: int) -> 
         since = parse(ann.get(ANN_UNUSED_SINCE))
     except ValueError:
         since = None
-    if since is None:
+    if since is None or since > now:  # a stamp in the future (hand edit, skew) is malformed too
         return "stamp"
     try:
         retention = int(ann.get(ANN_RETENTION, ""))
@@ -176,7 +176,10 @@ def _workspace_pass(ns: str, ctx, token: str, mounted: set[str], now: float, ret
                      content_type="application/merge-patch+json")
                 continue
             try:
-                _api("DELETE", path, ctx, token, {"preconditions": {"uid": c["metadata"]["uid"]}})
+                # Only the PVC exactly as listed: if the plugin cleared the stamp since (a Pod started),
+                # its resourceVersion changed and this fails 409 -- skip, re-evaluate next run.
+                _api("DELETE", path, ctx, token, {"preconditions": {
+                    "uid": c["metadata"]["uid"], "resourceVersion": c["metadata"]["resourceVersion"]}})
             except urllib.error.HTTPError as e:
                 if e.code == 404:
                     print(f"gone {name}")
