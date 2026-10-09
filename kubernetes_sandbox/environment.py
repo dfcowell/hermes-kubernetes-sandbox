@@ -16,7 +16,7 @@ from tools.environments.base import BaseEnvironment, EnvironmentConnectionError,
 from .exec_stream import ExecDisconnected, ExecFailed, StreamingExecHandle, connect_exec
 from .kube import Conflict, KubeClient, KubeError, NotFound, QuotaExceeded
 from .naming import ANN_LAST_USED, ANN_SESSION_KEY, LBL_PROFILE, LBL_TEMPLATE_HASH, MANAGED_BY, Identity, slug
-from .podspec import render_pod, template_hash
+from .podspec import identity_labels, render_pod, render_workspace_claim, template_hash
 from .runner import exec_argv, kill_argv, stdin_payload
 from .settings import Settings, interlock_error
 
@@ -130,14 +130,58 @@ class KubernetesEnvironment(BaseEnvironment):
                 and (md.get("labels") or {}).get(LBL_TEMPLATE_HASH) == template_hash(self._s)
                 and _live(pod))
 
-    def _wait_gone(self, name: str) -> None:
+    def _wait_gone(self, name: str, get=None) -> bool:
+        get = get or self._client.get_pod
         deadline = self._clock() + 60
         while self._clock() < deadline:
             try:
-                self._client.get_pod(name)
+                get(name)
             except NotFound:
-                return
+                return True
             self._sleep(1)
+        return False
+
+    def _owns_claim(self, pvc: dict) -> bool:
+        md = pvc.get("metadata") or {}
+        labels = md.get("labels") or {}
+        return (all(labels.get(k) == v for k, v in identity_labels(self._id).items())
+                and (md.get("annotations") or {}).get(ANN_SESSION_KEY) == self._id.session_key)
+
+    def _ensure_workspace(self) -> None:
+        """Get or create the session's workspace PVC, which outlives every Pod of the session.
+        A PVC being deleted (the janitor reaped it) is waited out and replaced by an empty one."""
+        name = self._id.workspace_claim
+        for _attempt in range(3):
+            try:
+                pvc = self._client.get_pvc(name)
+            except NotFound:
+                try:
+                    self._client.create_pvc(render_workspace_claim(self._s, self._id))
+                    return
+                except Conflict:
+                    continue  # created meanwhile (another gateway): GET and adopt it
+                except QuotaExceeded as e:
+                    raise self._capacity_error(e) from None
+            if (pvc.get("metadata") or {}).get("deletionTimestamp"):
+                self._notify("waiting for the expired workspace volume to be deleted")
+                if not self._wait_gone(name, self._client.get_pvc):
+                    raise EnvironmentConnectionError(
+                        f"Workspace volume {name} is still being deleted",
+                        retry_hint="Retry in a minute; a fresh workspace volume is created once it is gone.")
+                continue
+            if not self._owns_claim(pvc):
+                raise EnvironmentConnectionError(
+                    f"Refusing to mount workspace volume {name}: its labels or session key do not match "
+                    f"session {self._id.session_key!r} of profile {self._id.profile!r}",
+                    retry_hint="An operator must delete or rename that PVC; retrying will not help.")
+            return
+        raise EnvironmentConnectionError(f"Could not create workspace volume {name}: it keeps changing",
+                                         retry_hint="Retry the command.")
+
+    def _capacity_error(self, e: KubeError) -> EnvironmentConnectionError:
+        return EnvironmentConnectionError(
+            f"Sandbox capacity exhausted in namespace {self._s.namespace}: {e}",
+            retry_hint="Retry after an idle session's sandbox is reaped, or ask the operator to raise the quota.")
 
     def _check_capacity(self) -> None:
         sel = ",".join(f"{k}={v}" for k, v in MANAGED_BY.items()) + f",{LBL_PROFILE}={slug(self._id.profile, 63)}"
@@ -189,6 +233,7 @@ class KubernetesEnvironment(BaseEnvironment):
                 pod = self._client.get_pod(name)
                 if self._matches(pod):
                     if not _ready(pod):
+                        self._ensure_workspace()  # a Pod Pending on a reaped claim schedules once it exists
                         pod = self._wait_ready(name)
                     uid = _uid(pod)
                     known = self._pod_uid if self._pod_uid is not None else _served_uid(name)
@@ -207,6 +252,7 @@ class KubernetesEnvironment(BaseEnvironment):
             except NotFound:
                 pass
             self._check_capacity()
+            self._ensure_workspace()
             manifest = render_pod(self._s, self._id, now_iso=_now_iso(self._clock()),
                                   created_by=f"{socket.gethostname()}:{os.getpid()}")
             try:
@@ -214,9 +260,7 @@ class KubernetesEnvironment(BaseEnvironment):
             except Conflict:
                 continue  # someone else created it meanwhile: loop back and adopt
             except QuotaExceeded as e:
-                raise EnvironmentConnectionError(
-                    f"Sandbox capacity exhausted in namespace {self._s.namespace}: {e}",
-                    retry_hint="Retry after an idle session's sandbox is reaped, or ask the operator to raise the quota.")
+                raise self._capacity_error(e) from None
             except KubeError as e:
                 raise EnvironmentConnectionError(f"Could not create sandbox Pod {name}: {e}")
             self._new_pod()
@@ -330,6 +374,8 @@ class KubernetesEnvironment(BaseEnvironment):
         return result
 
     def cleanup(self):
+        # Deletes the Pod only, NEVER the workspace PVC: the session's next Pod mounts it again,
+        # and only the janitor deletes it (after workspace_retention unmounted).
         if _PROCESS_EXITING:
             return  # detach: the next gateway adopts the Pod, or the janitor reaps it
         try:

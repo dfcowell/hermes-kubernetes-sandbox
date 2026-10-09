@@ -91,3 +91,70 @@ def test_non_string_error_message_is_stringified(settings):
     with pytest.raises(KubeError) as ei:
         _client(settings, lambda r: httpx.Response(500, json={"reason": "X", "message": {"nested": 1}})).get_pod("p")
     assert "nested" in str(ei.value)
+
+
+PVCS = "/api/v1/namespaces/agent-sandbox/persistentvolumeclaims"
+
+
+def test_pvc_get_create_list_hit_the_pvc_collection(settings):
+    seen = []
+
+    def handler(req):
+        seen.append((req.method, req.url.path, req.url.params.get("labelSelector"),
+                     json.loads(req.content) if req.content else None, req.headers["authorization"]))
+        if req.method == "GET" and req.url.path == PVCS:
+            return httpx.Response(200, json={"items": [{"metadata": {"name": "c1"}}]})
+        return httpx.Response(200, json={"metadata": {"name": "c"}})
+
+    c = _client(settings, handler)
+    assert c.get_pvc("c")["metadata"]["name"] == "c"
+    assert c.create_pvc({"metadata": {"name": "c"}})["metadata"]["name"] == "c"
+    assert [p["metadata"]["name"] for p in c.list_pvcs("a=b")] == ["c1"]
+    assert seen == [("GET", PVCS + "/c", None, None, "Bearer t0k3n"),
+                    ("POST", PVCS, None, {"metadata": {"name": "c"}}, "Bearer t0k3n"),
+                    ("GET", PVCS, "a=b", None, "Bearer t0k3n")]
+
+
+def test_pvc_errors_map_like_pods(settings):
+    from kubernetes_sandbox.kube import Conflict, KubeError
+    with pytest.raises(NotFound):
+        _client(settings, lambda r: httpx.Response(404, json={"reason": "NotFound"})).get_pvc("x")
+    with pytest.raises(Conflict):
+        _client(settings, lambda r: httpx.Response(409, json={"reason": "AlreadyExists"})).create_pvc(
+            {"metadata": {"name": "x"}})
+    with pytest.raises(KubeError) as ei:
+        _client(settings, lambda r: httpx.Response(403, json={"reason": "Forbidden", "message": "no"})).list_pvcs("")
+    assert "t0k3n" not in str(ei.value) and "Bearer" not in str(ei.value)
+
+
+def test_patch_pvc_uses_merge_patch(settings):
+    seen = {}
+
+    def handler(req):
+        seen.update(method=req.method, path=req.url.path, ctype=req.headers["content-type"],
+                    body=json.loads(req.content))
+        return httpx.Response(200, json={})
+
+    _client(settings, handler).patch_pvc("c", {"metadata": {"annotations": {"a": None}}})
+    assert seen == {"method": "PATCH", "path": PVCS + "/c", "ctype": "application/merge-patch+json",
+                    "body": {"metadata": {"annotations": {"a": None}}}}
+
+
+def test_delete_pvc_sends_uid_precondition_and_maps_conflict(settings):
+    from kubernetes_sandbox.kube import Conflict
+    seen = {}
+
+    def handler(req):
+        seen.update(method=req.method, path=req.url.path, body=json.loads(req.content))
+        return httpx.Response(200, json={})
+
+    _client(settings, handler).delete_pvc("c", uid="u-1")
+    assert seen == {"method": "DELETE", "path": PVCS + "/c", "body": {"preconditions": {"uid": "u-1"}}}
+    with pytest.raises(Conflict):
+        _client(settings, lambda r: httpx.Response(409, json={"reason": "Conflict"})).delete_pvc("c", uid="u-2")
+    _client(settings, lambda r: httpx.Response(404, json={})).delete_pvc("gone", uid="u-3")
+
+
+def test_non_json_2xx_body_raises_json_decode_error(settings):
+    with pytest.raises(json.JSONDecodeError):
+        _client(settings, lambda r: httpx.Response(200, text="<html>proxy</html>")).get_pod("p")

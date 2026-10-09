@@ -1,15 +1,17 @@
 import copy
 import uuid
 
-from kubernetes_sandbox.kube import NotFound, QuotaExceeded
+from kubernetes_sandbox.kube import Conflict, NotFound, QuotaExceeded
 
 
 class FakeKube:
-    """In-memory Pod store. `ready_after` = get_pod calls before a created Pod reports Ready."""
+    """In-memory Pod and PVC store. `ready_after` = get_pod calls before a created Pod reports Ready.
+    A PVC with a deletionTimestamp disappears after `pvc_gone_after` further get_pvc calls."""
 
-    def __init__(self, ready_after=1, quota=None):
+    def __init__(self, ready_after=1, quota=None, pvc_gone_after=2):
         self.pods, self.calls, self.ready_after, self.quota = {}, [], ready_after, quota
         self._gets = {}
+        self.pvcs, self.pvc_gone_after, self._pvc_gets = {}, pvc_gone_after, {}
 
     def _ready(self, pod):
         pod.setdefault("status", {})
@@ -47,6 +49,40 @@ class FakeKube:
     def patch_pod_annotations(self, name, annotations):
         self.calls.append(("patch", name))
         self.pods[name]["metadata"]["annotations"].update(annotations)
+
+
+    def get_pvc(self, name):
+        self.calls.append(("get_pvc", name))
+        pvc = self.pvcs.get(name)
+        if pvc is None:
+            raise NotFound(404, "NotFound", name)
+        if pvc["metadata"].get("deletionTimestamp"):
+            self._pvc_gets[name] = self._pvc_gets.get(name, 0) + 1
+            if self._pvc_gets[name] > self.pvc_gone_after:
+                del self.pvcs[name]
+                raise NotFound(404, "NotFound", name)
+        return copy.deepcopy(pvc)
+
+    def create_pvc(self, manifest):
+        name = manifest["metadata"]["name"]
+        self.calls.append(("create_pvc", name))
+        if name in self.pvcs:
+            raise Conflict(409, "AlreadyExists", name)
+        pvc = copy.deepcopy(manifest)
+        pvc["metadata"]["uid"] = str(uuid.uuid4())
+        self.pvcs[name] = pvc
+        return copy.deepcopy(pvc)
+
+    def list_pvcs(self, label_selector):
+        return [copy.deepcopy(p) for p in self.pvcs.values()]
+
+    def patch_pvc(self, name, merge_patch):
+        self.calls.append(("patch_pvc", name))
+
+    def delete_pvc(self, name, *, uid):
+        self.calls.append(("delete_pvc", name))
+        if name in self.pvcs and self.pvcs[name]["metadata"]["uid"] == uid:
+            del self.pvcs[name]
 
 
 class FakeExec:

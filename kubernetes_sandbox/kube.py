@@ -1,4 +1,4 @@
-"""Minimal Kubernetes API client for sandbox Pods (httpx; no kubernetes package)."""
+"""Minimal Kubernetes API client for sandbox Pods and workspace PVCs (httpx; no kubernetes package)."""
 from __future__ import annotations
 
 import json
@@ -48,7 +48,13 @@ class KubeClient:
         return {"Authorization": f"Bearer {token}"}
 
     def _pods(self, name: str = "") -> str:
-        path = f"{self._base}/api/v1/namespaces/{self._s.namespace}/pods"
+        return self._collection("pods", name)
+
+    def _pvcs(self, name: str = "") -> str:
+        return self._collection("persistentvolumeclaims", name)
+
+    def _collection(self, kind: str, name: str) -> str:
+        path = f"{self._base}/api/v1/namespaces/{self._s.namespace}/{kind}"
         return f"{path}/{name}" if name else path
 
     def _request(self, method: str, url: str, **kw) -> httpx.Response:
@@ -92,6 +98,27 @@ class KubeClient:
             content=json.dumps({"metadata": {"annotations": annotations}}),
             headers={"Content-Type": "application/merge-patch+json"},
         )
+
+    # --- workspace PersistentVolumeClaims ------------------------------------
+    def get_pvc(self, name: str) -> dict:
+        return self._request("GET", self._pvcs(name)).json()
+
+    def create_pvc(self, manifest: dict) -> dict:
+        return self._request("POST", self._pvcs(), json=manifest).json()
+
+    def list_pvcs(self, label_selector: str) -> list[dict]:
+        return self._request("GET", self._pvcs(), params={"labelSelector": label_selector}).json().get("items", [])
+
+    def patch_pvc(self, name: str, merge_patch: dict) -> None:
+        self._request("PATCH", self._pvcs(name), content=json.dumps(merge_patch),
+                      headers={"Content-Type": "application/merge-patch+json"})
+
+    def delete_pvc(self, name: str, *, uid: str) -> None:
+        """Deletes only the PVC with this uid (409 Conflict if the name now holds another)."""
+        try:
+            self._request("DELETE", self._pvcs(name), json={"preconditions": {"uid": uid}})
+        except NotFound:
+            pass
 
     def exec_url(self, name: str, container: str, argv: list[str]) -> str:
         q = [("container", container), ("stdin", "true"), ("stdout", "true"), ("stderr", "true")]

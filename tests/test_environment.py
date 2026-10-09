@@ -532,3 +532,157 @@ def test_capacity_ignores_finished_and_terminating_pods():
     kube._gets[Identity("mars", "done").pod_name] = -100
     e.ensure_pod()
     assert e._pod_ready
+
+
+# --- persistent workspace volume (Task 12) -----------------------------------------------------
+def _claim(settings=S, ident=ID):
+    from kubernetes_sandbox.podspec import render_workspace_claim
+    return render_workspace_claim(settings, ident)
+
+
+def test_workspace_pvc_is_created_before_the_pod():
+    e, kube, _ = _env()
+    e.ensure_pod()
+    creates = [c for c in kube.calls if c[0] in ("create", "create_pvc")]
+    assert creates == [("create_pvc", ID.workspace_claim), ("create", ID.pod_name)]
+    assert kube.pvcs[ID.workspace_claim]["metadata"]["annotations"][
+        "hermes-sandbox/workspace-retention-seconds"] == str(S.workspace_retention_seconds)
+    vols = {v["name"]: v for v in kube.pods[ID.pod_name]["spec"]["volumes"]}
+    assert vols["workspace"]["persistentVolumeClaim"]["claimName"] == ID.workspace_claim
+
+
+def test_existing_workspace_pvc_is_adopted():
+    e, kube, _ = _env()
+    kube.create_pvc(_claim())
+    uid = kube.pvcs[ID.workspace_claim]["metadata"]["uid"]
+    kube.calls.clear()
+    e.ensure_pod()
+    assert kube.calls.count(("create_pvc", ID.workspace_claim)) == 0
+    assert kube.pvcs[ID.workspace_claim]["metadata"]["uid"] == uid
+    assert ("create", ID.pod_name) in kube.calls
+
+
+def test_conflict_creating_the_pvc_adopts_it():
+    kube = FakeKube()
+    real = kube.create_pvc
+
+    def racing(manifest):
+        real(manifest)           # another gateway wins the race
+        raise Conflict(409, "AlreadyExists", manifest["metadata"]["name"])
+
+    kube.create_pvc = racing
+    e, _, _ = _env(kube=kube)
+    e.ensure_pod()
+    assert e._pod_ready and ID.workspace_claim in kube.pvcs
+
+
+def test_terminating_pvc_is_waited_out_then_recreated():
+    kube = FakeKube(pvc_gone_after=2)
+    kube.create_pvc(_claim())
+    old_uid = kube.pvcs[ID.workspace_claim]["metadata"]["uid"]
+    kube.pvcs[ID.workspace_claim]["metadata"]["deletionTimestamp"] = "2026-10-09T00:00:00Z"
+    kube.calls.clear()
+    e, _, _ = _env(kube=kube)
+    e.ensure_pod()
+    new = kube.pvcs[ID.workspace_claim]["metadata"]
+    assert new["uid"] != old_uid and "deletionTimestamp" not in new
+    calls = [c for c in kube.calls if c[0] in ("get_pvc", "create_pvc", "create")]
+    assert calls.index(("create_pvc", ID.workspace_claim)) < calls.index(("create", ID.pod_name))
+    assert calls.count(("get_pvc", ID.workspace_claim)) >= 3
+
+
+def test_pvc_that_never_finishes_terminating_is_a_connection_error():
+    kube = FakeKube(pvc_gone_after=10**9)
+    kube.create_pvc(_claim())
+    kube.pvcs[ID.workspace_claim]["metadata"]["deletionTimestamp"] = "2026-10-09T00:00:00Z"
+    ticks = iter(range(0, 10**6, 5))
+    e = KubernetesEnvironment(settings=S, identity=ID, cwd="/workspace", timeout=30, client=kube,
+                              exec_connect=FakeExec(), clock=lambda: float(next(ticks)), sleep=lambda s: None)
+    with pytest.raises(EnvironmentConnectionError, match="being deleted"):
+        e.ensure_pod()
+    assert ("create", ID.pod_name) not in kube.calls
+
+
+@pytest.mark.parametrize("tamper", [
+    lambda md: md["labels"].__setitem__("hermes-sandbox/key-hash", "0000000000"),
+    lambda md: md["labels"].pop("app.kubernetes.io/managed-by"),
+    lambda md: md["labels"].__setitem__("hermes-sandbox/profile", "venus"),
+    lambda md: md["annotations"].__setitem__("hermes-sandbox/session-key", "someone-else"),
+])
+def test_label_mismatched_pvc_is_never_mounted(tamper):
+    kube = FakeKube()
+    kube.create_pvc(_claim())
+    tamper(kube.pvcs[ID.workspace_claim]["metadata"])
+    e, _, _ = _env(kube=kube)
+    with pytest.raises(EnvironmentConnectionError, match="workspace volume") as ei:
+        e.ensure_pod()
+    assert "retrying will not help" in ei.value.retry_hint
+    assert ("create", ID.pod_name) not in kube.calls
+    assert ID.workspace_claim in kube.pvcs
+
+
+@pytest.mark.parametrize("method", ["get_pvc", "create_pvc"])
+@pytest.mark.parametrize("exc", [
+    __import__("kubernetes_sandbox.kube", fromlist=["KubeError"]).KubeError(500, "InternalError", "etcd down"),
+    __import__("kubernetes_sandbox.kube", fromlist=["KubeError"]).KubeError(403, "Forbidden", "no pvc/create"),
+    __import__("httpx").ConnectError("connection refused"),
+])
+def test_pvc_api_errors_are_connection_errors(method, exc):
+    e, kube, _ = _env()
+    setattr(kube, method, _raising(exc))
+    with pytest.raises(EnvironmentConnectionError) as ei:
+        e.ensure_pod()
+    assert "Bearer" not in str(ei.value)
+    if hasattr(exc, "status"):
+        assert str(exc.status) in str(ei.value) and exc.reason in str(ei.value)
+    assert ("create", ID.pod_name) not in kube.calls
+
+
+def test_pvc_quota_exceeded_is_capacity_error():
+    from kubernetes_sandbox.kube import QuotaExceeded
+    e, kube, _ = _env()
+    kube.create_pvc = _raising(QuotaExceeded(403, "Forbidden", "exceeded quota: persistentvolumeclaims"))
+    with pytest.raises(EnvironmentConnectionError, match="capacity exhausted") as ei:
+        e.ensure_pod()
+    assert "idle" in ei.value.retry_hint
+
+
+def test_pvc_is_not_created_when_the_profile_is_at_capacity():
+    kube = FakeKube(ready_after=0)
+    s = Settings(runtime_class_name="kata", docker_disk_storage_class="b", max_per_profile=1)
+    kube.create_pod(render_pod(s, Identity("mars", "other"), now_iso="x", created_by="x"))
+    e, _, _ = _env(kube=kube, settings=s)
+    with pytest.raises(EnvironmentConnectionError, match="limit reached"):
+        e.ensure_pod()
+    assert kube.pvcs == {}
+
+
+def test_unready_adopted_pod_re_ensures_its_workspace():
+    # The janitor reaped the PVC as a new Pod was being created: the Pod sits Pending on a
+    # missing claim. Re-creating the claim lets it schedule.
+    kube = FakeKube(ready_after=2)
+    kube.create_pod(render_pod(S, ID, now_iso="2026-01-01T00:00:00Z", created_by="other"))
+    e, _, _ = _env(kube=kube)
+    e.ensure_pod()
+    assert ID.workspace_claim in kube.pvcs and e._pod_ready
+
+
+def test_cleanup_never_deletes_the_workspace_pvc():
+    e, kube, _ = _env()
+    e.execute("echo hi")
+    e.cleanup()
+    assert ID.pod_name not in kube.pods
+    assert ID.workspace_claim in kube.pvcs
+    assert not any(c[0] == "delete_pvc" for c in kube.calls)
+
+
+def test_new_pod_after_cleanup_mounts_the_same_pvc():
+    e, kube, _ = _env()
+    e.execute("echo hi")
+    uid = kube.pvcs[ID.workspace_claim]["metadata"]["uid"]
+    e.cleanup()
+    e2, _, _ = _env(kube=kube)
+    assert e2.execute("echo hi")["environment_recreated"] is True
+    assert kube.pvcs[ID.workspace_claim]["metadata"]["uid"] == uid
+    assert kube.calls.count(("create_pvc", ID.workspace_claim)) == 1
+
