@@ -11,9 +11,12 @@ Which namespace/runtime is exercised (Kata ``agent-sandbox``, runc ``agent-sandb
 is decided entirely by the settings file.
 
 Prints only PASS/FAIL lines with short details (never the token or exec payloads). Exit 0 iff
-every check passed. The Pod is always deleted at the end.
+every check passed. The Pod and the session's workspace PVC are always deleted at the end; the
+driver Role has no PVC delete, so with a driver token the PVC deletion is refused and the script
+prints the kubectl command to remove it (a WARN line, not a failed check).
 """
 import pathlib
+import secrets
 import shutil
 import sys
 import tempfile
@@ -34,6 +37,7 @@ def main(argv: list[str]) -> int:
         return 2
 
     from kubernetes_sandbox.environment import KubernetesEnvironment
+    from kubernetes_sandbox.kube import NotFound
     from kubernetes_sandbox.naming import Identity
     from kubernetes_sandbox.settings import load_settings
 
@@ -115,6 +119,28 @@ def main(argv: list[str]) -> int:
               and env.cwd == "/workspace/sub",
               f"returncode={r.get('returncode')} environment_recreated={r.get('environment_recreated')} "
               f"cwd={env.cwd}")
+        # Workspace persistence: files under /workspace survive the Pod. The cat is the FIRST
+        # command after the deletion, so it is also the one that carries environment_recreated.
+        marker = secrets.token_hex(16)
+        r = env.execute(f"printf %s {marker} > /workspace/e2e-persist.txt && sync")
+        check("marker written to /workspace", r["returncode"] == 0, f"returncode={r['returncode']}")
+        env._client.delete_pod(env._id.pod_name, grace_seconds=0)
+        env._wait_gone(env._id.pod_name)
+        r = env.execute("cat /workspace/e2e-persist.txt")
+        check("workspace survives Pod deletion",
+              r["returncode"] == 0 and r["output"].strip() == marker and r.get("environment_recreated") is True,
+              f"returncode={r['returncode']} same_content={r['output'].strip() == marker} "
+              f"environment_recreated={r.get('environment_recreated')}")
+        claim = env._client.get_pvc(env._id.workspace_claim)
+        env.cleanup()
+        pod_gone = env._wait_gone(env._id.pod_name)
+        try:
+            after = env._client.get_pvc(env._id.workspace_claim)
+            kept = (after["metadata"]["uid"] == claim["metadata"]["uid"]
+                    and not after["metadata"].get("deletionTimestamp"))
+        except NotFound:
+            kept = False
+        check("cleanup keeps the volume", pod_gone and kept, f"pod_gone={pod_gone} pvc_kept={kept}")
     except Exception as e:  # report, don't leak payloads
         check("unexpected error", False, type(e).__name__ + ": " + str(e)[:200])
     finally:
@@ -123,8 +149,27 @@ def main(argv: list[str]) -> int:
         except Exception:
             pass
         env.cleanup()
+        delete_workspace(env)
     print(f"{sum(results)}/{len(results)} passed")
     return 0 if results and all(results) else 1
+
+
+def delete_workspace(env) -> None:
+    """Test artifacts must not linger: delete the session's workspace PVC (needs PVC delete)."""
+    from kubernetes_sandbox.kube import KubeError, NotFound
+    name, ns = env._id.workspace_claim, env._s.namespace
+    try:
+        uid = env._client.get_pvc(name)["metadata"]["uid"]
+        env._client.delete_pvc(name, uid=uid)
+        print(f"deleted workspace PVC {name}", flush=True)
+    except NotFound:
+        pass
+    except KubeError as e:
+        print(f"WARN workspace PVC {name} not deleted ({e.status} {e.reason}); "
+              f"remove it: kubectl -n {ns} delete pvc {name}", flush=True)
+    except Exception as e:
+        print(f"WARN workspace PVC {name} not deleted ({type(e).__name__}); "
+              f"remove it: kubectl -n {ns} delete pvc {name}", flush=True)
 
 
 if __name__ == "__main__":
