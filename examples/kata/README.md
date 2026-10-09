@@ -15,6 +15,9 @@ not exposed. This is the recommended deployment when agents need `docker`.
   [kata-node-config.md](kata-node-config.md) (not optional).
 - A StorageClass that provisions **Block** volumes (`volumeMode: Block`, access mode `ReadWriteOncePod`); the Docker disk is a
   generic ephemeral volume that lives and dies with the Pod.
+- A StorageClass for the per-session **workspace** volumes (filesystem, `ReadWriteOnce`; the cluster
+  default is used unless `workspace_storage_class` is set). The workspace outlives the session's Pods; under Kata it
+  is shared into the VM over virtio-fs (see the top-level README, "Workspace persistence").
 - A CNI that enforces NetworkPolicy. With Cilium, `socketLB.hostNamespaceOnly: true` is mandatory:
   without it Service connectivity from Kata Pods breaks (see networkpolicy.yaml).
 
@@ -40,7 +43,7 @@ Then put `kubernetes-sandbox.yaml` (edit the StorageClass) in `$HERMES_HOME` and
 ## Give the gateway the driver credentials
 
 The plugin talks to the API server as the `hermes-sandbox-driver` ServiceAccount (`rbac.yaml`:
-Pods, `pods/exec`, `pods/log` in `agent-sandbox` only). Run the Hermes Pod as that ServiceAccount, turn
+Pods, `pods/exec`, `pods/log`, and create/get/list on PersistentVolumeClaims, in `agent-sandbox` only). Run the Hermes Pod as that ServiceAccount, turn
 off the automatic token mount, and project a short-lived token plus the cluster CA on the **gateway
 container only**, so no other container in the Pod sees it. The plugin re-reads the token file on
 every request, so kubelet's rotation just works.
@@ -79,12 +82,23 @@ For a gateway running **outside the cluster**, mint a bounded token and write it
 hermes-sandbox-driver`). It never expires, is not bound to the Pod, and anyone who can read Secrets in
 that namespace can use it. Prefer the projected token above.
 
-## Janitor
+## Janitor (required)
 
-`janitor.yaml` reaps sandbox Pods left behind by a crashed or stopped gateway, idle Pods
-(`IDLE_SECONDS`), finished Pods and Pods past `max_lifetime_seconds` (the janitor is what
-enforces that annotation). Set `NAMESPACE` to your sandbox namespace and the CronJob/ConfigMap
-namespace to your Hermes namespace.
+Sandbox Pods come and go: the plugin deletes a session's Pod when Hermes ends the environment
+(session close, idle reaper, a graceful gateway stop, eviction after an infrastructure error),
+and the next command starts a new Pod that mounts the same workspace volume. The janitor is
+**required**, because it is the only thing that ever deletes a workspace volume. Every 5 minutes
+`janitor.yaml`:
+
+- reaps idle Pods (`IDLE_SECONDS`), finished Pods, Pods past `max_lifetime_seconds` (the janitor
+  is what enforces that annotation) and Pods a crashed (killed) gateway left behind;
+- stamps each workspace PVC that no Pod mounts with `hermes-sandbox/unused-since`, clears the stamp
+  when a Pod mounts it again, and deletes it once it has been unmounted for longer than its
+  retention: the PVC's `hermes-sandbox/workspace-retention-seconds` annotation (the plugin's
+  `workspace_retention`, default 7 days), else `WORKSPACE_RETENTION_SECONDS`.
+
+Set `NAMESPACE` to your sandbox namespace and the CronJob/ConfigMap namespace to your Hermes
+namespace.
 
 ### First manual janitor run
 

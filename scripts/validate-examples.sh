@@ -3,9 +3,10 @@
 #   (no flag)         read-only: server-side dry run of every manifest. Creates nothing: the
 #                     namespaces must already exist. Safe against a real cluster.
 #   --apply           THROWAWAY CLUSTERS ONLY (CI kind): applies the example manifests for real,
-#                     then server-side dry-runs the Pods the plugin itself renders from the sample
-#                     settings (both docker_cli modes into the Kata namespace, docker: false into
-#                     the runc namespace). Any admission rejection fails the run.
+#                     then server-side dry-runs what the plugin itself renders from the sample
+#                     settings -- the session's workspace PVC and its Pod, as one List (both
+#                     docker_cli modes into the Kata namespace, docker: false into the runc
+#                     namespace). Any admission rejection (PSA, policy, quota) fails the run.
 #   --render-janitor  regenerates examples/kata/janitor.yaml's ConfigMap from janitor/janitor.py.
 # PYTHON: an interpreter with PyYAML (CI: a uv venv); the plugin itself is imported from the repo.
 set -euo pipefail
@@ -82,7 +83,7 @@ if [ "$mode" = "--apply" ]; then
     PYTHONPATH=. "$PYTHON" - "$1" "$2" <<'PY'
 import dataclasses, json, pathlib, sys, tempfile
 from kubernetes_sandbox.naming import Identity
-from kubernetes_sandbox.podspec import render_pod
+from kubernetes_sandbox.podspec import render_pod, render_workspace_claim
 from kubernetes_sandbox.settings import load_settings
 example, cli = sys.argv[1:3]
 with tempfile.TemporaryDirectory() as home:
@@ -91,13 +92,17 @@ with tempfile.TemporaryDirectory() as home:
     s = load_settings(pathlib.Path(home))
 if s.docker:
     s = dataclasses.replace(s, docker_cli=cli)
-print(json.dumps(render_pod(s, Identity("ci", "x"), now_iso="2026-01-01T00:00:00Z", created_by="ci")))
+ident = Identity("ci", "x")
+print(json.dumps({"apiVersion": "v1", "kind": "List", "items": [
+    render_workspace_claim(s, ident),
+    render_pod(s, ident, now_iso="2026-01-01T00:00:00Z", created_by="ci")]}))
 PY
   }
   for spec in "examples/kata image-volume" "examples/kata init-copy" "examples/runc-no-docker -"; do
     set -- $spec
     render "$1" "$2" | kubectl create --dry-run=server -f - >/dev/null \
-      && echo "ok   plugin-rendered Pod ($1, docker_cli=$2)" || { echo "FAIL plugin-rendered Pod ($1, docker_cli=$2)"; rc=1; }
+      && echo "ok   plugin-rendered PVC + Pod ($1, docker_cli=$2)" \
+      || { echo "FAIL plugin-rendered PVC + Pod ($1, docker_cli=$2)"; rc=1; }
   done
   exit "$rc"
 fi

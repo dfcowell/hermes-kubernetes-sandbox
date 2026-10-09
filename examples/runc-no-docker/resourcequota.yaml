@@ -1,6 +1,12 @@
 # Caps the blast radius of the sandbox namespace: 4 concurrent sessions.
 # Per-session (defaults, no Docker): one work container, 512Mi memory limit and 100m CPU
-# request, plus a 10Gi workspace emptyDir. No PVCs, so no storage quota.
+# request, plus a 10Gi workspace PVC that outlives the Pod until the janitor deletes it,
+# workspace_retention (7d) after it was last mounted. Sized for 4 live sessions + 12 idle
+# workspaces:
+#   PVCs:    4 + 12 = 16
+#   storage: 16 x 10Gi = 160Gi
+# Count every session started within the retention window as an idle workspace. When the quota
+# is full, new sessions fail with a retryable "capacity exhausted" error.
 apiVersion: v1
 kind: ResourceQuota
 metadata:
@@ -12,3 +18,5 @@ spec:
     requests.cpu: "1"
     requests.memory: 2Gi
     limits.memory: 2Gi
+    persistentvolumeclaims: "16"
+    requests.storage: 160Gi

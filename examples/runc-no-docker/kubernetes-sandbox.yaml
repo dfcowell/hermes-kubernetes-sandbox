@@ -1,6 +1,10 @@
 # Sample plugin settings: save as <HERMES_HOME>/kubernetes-sandbox.yaml
 namespace: agent-sandbox-runc
 docker: false              # unprivileged Pod, no Docker-in-Docker, no RuntimeClass
+# Each session's /workspace is a PVC that outlives its Pods (RWO filesystem volume).
+# workspace_storage_class: <your RWO filesystem StorageClass>   # unset = the cluster's default StorageClass
+workspace_size: 10Gi
+workspace_retention: 7d   # the janitor deletes a workspace this long after it was last mounted
 token_path: /var/run/secrets/hermes-sandbox/token
 ca_path: /var/run/secrets/hermes-sandbox/ca.crt
 work_image: nousresearch/hermes-sandbox:desktop@sha256:669abbd2df186067be9c645eee5fddb8764c9fe8b9edd28625ec3a61e6685443 # bump deliberately

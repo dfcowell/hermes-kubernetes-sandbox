@@ -1,4 +1,5 @@
-# Reaps idle, expired and finished sandbox Pods. The ConfigMap is GENERATED from
+# REQUIRED: reaps idle, expired and finished sandbox Pods, and is the ONLY thing that deletes
+# workspace volumes (unmounted for longer than their retention). The ConfigMap is GENERATED from
 # janitor/janitor.py by `scripts/validate-examples.sh --render-janitor`; do not edit it by hand.
 # metadata.namespace (here and on the CronJob): change `hermes` to your Hermes namespace.
 apiVersion: v1
@@ -239,6 +240,10 @@ spec:
               value: agent-sandbox
             - name: IDLE_SECONDS
               value: '3600'
+            # Fallback retention for workspace PVCs; each PVC's own
+            # hermes-sandbox/workspace-retention-seconds annotation (the plugin's workspace_retention) wins.
+            - name: WORKSPACE_RETENTION_SECONDS
+              value: '604800'
             securityContext:
               allowPrivilegeEscalation: false
               readOnlyRootFilesystem: true

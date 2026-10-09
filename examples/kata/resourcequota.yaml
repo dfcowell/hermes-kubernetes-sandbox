@@ -3,6 +3,13 @@
 # 1024Mi = 2560Mi. The quota counts limits (and requests) including overhead, so 4 sessions
 # need up to 10Gi of requests / 11Gi of limits. Raise these if you raise work_memory,
 # dind_memory or max_per_profile.
+# Storage: a live session holds two PVCs (30Gi Docker disk + 10Gi workspace); a session with no
+# Pod still holds its 10Gi workspace until the janitor deletes it, workspace_retention (7d) after
+# it was last mounted. Sized for 4 live sessions + 12 idle workspaces:
+#   PVCs:    4 x 2 + 12 = 20
+#   storage: 4 x (30Gi + 10Gi) + 12 x 10Gi = 160Gi + 120Gi = 280Gi
+# Count every session started within the retention window as an idle workspace. When the quota
+# is full, new sessions fail with a retryable "capacity exhausted" error.
 apiVersion: v1
 kind: ResourceQuota
 metadata:
@@ -14,5 +21,5 @@ spec:
     requests.cpu: "4"
     requests.memory: 10Gi
     limits.memory: 11Gi
-    persistentvolumeclaims: "4"
-    requests.storage: 120Gi
+    persistentvolumeclaims: "20"
+    requests.storage: 280Gi

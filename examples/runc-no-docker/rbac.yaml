@@ -1,8 +1,8 @@
 # Driver ServiceAccount: what the Hermes gateway uses to manage sandbox Pods. Run the Hermes Pod
 # AS this ServiceAccount (serviceAccountName), or, if it must keep its own, bind the Role below to
 # that ServiceAccount instead. It lives in the Hermes namespace (`hermes` here -- CHANGE TO YOURS)
-# and is granted rights only inside `agent-sandbox-runc`. The plugin never touches PVCs itself (the ephemeral-volume
-# controller creates the Docker-disk PVC), so no PVC permissions are needed.
+# and is granted rights only inside `agent-sandbox-runc`. PVCs: the plugin creates each session's workspace
+# volume (`<pod name>-ws`) and reads it back; it never deletes one -- only the janitor does.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -25,6 +25,9 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -39,3 +42,39 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: hermes-sandbox-driver
+---
+# Janitor ServiceAccount (runs a copy of ../kata/janitor.yaml with NAMESPACE=agent-sandbox-runc):
+# lists every Pod (any Pod mounting a workspace volume keeps it), deletes sandbox Pods, stamps and
+# deletes unmounted workspace PVCs. Same ServiceAccount as the Kata example; applying both is fine.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hermes-sandbox-janitor
+  namespace: hermes # change to your Hermes namespace
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hermes-sandbox-janitor
+  namespace: agent-sandbox-runc
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["list", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hermes-sandbox-janitor
+  namespace: agent-sandbox-runc
+subjects:
+  - kind: ServiceAccount
+    name: hermes-sandbox-janitor
+    namespace: hermes # change to your Hermes namespace
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hermes-sandbox-janitor
