@@ -1,0 +1,98 @@
+"""Minimal Kubernetes API client for sandbox Pods (httpx; no kubernetes package)."""
+from __future__ import annotations
+
+import json
+import pathlib
+import ssl
+import urllib.parse
+
+import httpx
+
+from .settings import Settings
+
+
+class KubeError(RuntimeError):
+    def __init__(self, status: int, reason: str, message: str):
+        super().__init__(f"{status} {reason}: {message}")
+        self.status, self.reason = status, reason
+
+
+class NotFound(KubeError):
+    pass
+
+
+class Conflict(KubeError):
+    pass
+
+
+class QuotaExceeded(KubeError):
+    pass
+
+
+class KubeClient:
+    def __init__(self, settings: Settings, *, transport: httpx.BaseTransport | None = None):
+        self._s = settings
+        self._base = settings.api_url.rstrip("/")
+        self._http = httpx.Client(transport=transport, verify=self.ssl_context(), timeout=30.0)
+
+    def ssl_context(self) -> ssl.SSLContext | bool:
+        if self._s.ca_path and pathlib.Path(self._s.ca_path).exists():
+            return ssl.create_default_context(cafile=self._s.ca_path)
+        return True
+
+    def auth_headers(self) -> dict:
+        # Re-read on every call: projected service-account tokens rotate.
+        token = pathlib.Path(self._s.token_path).read_text(encoding="utf-8").strip()
+        return {"Authorization": f"Bearer {token}"}
+
+    def _pods(self, name: str = "") -> str:
+        path = f"{self._base}/api/v1/namespaces/{self._s.namespace}/pods"
+        return f"{path}/{name}" if name else path
+
+    def _request(self, method: str, url: str, **kw) -> httpx.Response:
+        headers = {**self.auth_headers(), **kw.pop("headers", {})}
+        r = self._http.request(method, url, headers=headers, **kw)
+        if r.status_code < 400:
+            return r
+        try:
+            body = r.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        reason, message = body.get("reason", ""), body.get("message", r.text[:300])
+        if r.status_code == 404:
+            raise NotFound(404, reason, message)
+        if r.status_code == 409:
+            raise Conflict(409, reason, message)
+        if r.status_code == 403 and "exceeded quota" in message:
+            raise QuotaExceeded(403, reason, message)
+        raise KubeError(r.status_code, reason, message)
+
+    def get_pod(self, name: str) -> dict:
+        return self._request("GET", self._pods(name)).json()
+
+    def create_pod(self, manifest: dict) -> dict:
+        return self._request("POST", self._pods(), json=manifest).json()
+
+    def delete_pod(self, name: str, grace_seconds: int = 10) -> None:
+        try:
+            self._request("DELETE", self._pods(name), json={"gracePeriodSeconds": grace_seconds})
+        except NotFound:
+            pass
+
+    def list_pods(self, label_selector: str) -> list[dict]:
+        return self._request("GET", self._pods(), params={"labelSelector": label_selector}).json().get("items", [])
+
+    def patch_pod_annotations(self, name: str, annotations: dict) -> None:
+        self._request(
+            "PATCH", self._pods(name),
+            content=json.dumps({"metadata": {"annotations": annotations}}),
+            headers={"Content-Type": "application/merge-patch+json"},
+        )
+
+    def exec_url(self, name: str, container: str, argv: list[str]) -> str:
+        q = [("container", container), ("stdin", "true"), ("stdout", "true"), ("stderr", "true")]
+        q += [("command", a) for a in argv]
+        base = self._base.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
+        return f"{base}/api/v1/namespaces/{self._s.namespace}/pods/{name}/exec?{urllib.parse.urlencode(q)}"
