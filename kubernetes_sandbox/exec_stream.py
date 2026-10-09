@@ -1,0 +1,138 @@
+"""Kubernetes exec over websocket (v5.channel.k8s.io) behind Hermes's ProcessHandle protocol."""
+from __future__ import annotations
+
+import json
+import os
+import threading
+from typing import Callable, Protocol
+
+STDIN, STDOUT, STDERR, ERROR, CLOSE = 0, 1, 2, 3, 255
+SUBPROTOCOL = "v5.channel.k8s.io"
+_CHUNK = 64 * 1024
+
+
+class Connection(Protocol):
+    def send(self, data: bytes) -> None: ...
+    def recv(self, timeout: float | None = None) -> bytes: ...
+    def close(self) -> None: ...
+
+
+class ExecFailed(RuntimeError):
+    pass
+
+
+class ExecDisconnected(RuntimeError):
+    pass
+
+
+def encode_frame(channel: int, data: bytes) -> bytes:
+    return bytes([channel]) + data
+
+
+def close_stdin_frame() -> bytes:
+    return bytes([CLOSE, STDIN])
+
+
+def parse_status(payload: bytes) -> int:
+    st = json.loads(payload.decode("utf-8", "replace") or "{}")
+    if st.get("status") == "Success":
+        return 0
+    for cause in (st.get("details") or {}).get("causes") or []:
+        if cause.get("reason") == "ExitCode":
+            return int(cause.get("message", "1"))
+    raise ExecFailed(st.get("message") or "exec failed")
+
+
+class StreamingExecHandle:
+    def __init__(self, connect: Callable[[], Connection], payload: bytes, on_kill: Callable[[], None]):
+        self._on_kill = on_kill
+        self._done = threading.Event()
+        self._killed = threading.Event()
+        self._returncode: int | None = None
+        self.error: BaseException | None = None
+        self._conn: Connection | None = None
+        r, w = os.pipe()
+        self._stdout = os.fdopen(r, "r", encoding="utf-8", errors="replace")
+        self._w = w
+        threading.Thread(target=self._run, args=(connect, payload), daemon=True).start()
+
+    @property
+    def stdout(self):
+        return self._stdout
+
+    @property
+    def returncode(self):
+        return self._returncode
+
+    def _write(self, data: bytes) -> None:
+        try:
+            os.write(self._w, data)
+        except OSError:
+            pass
+
+    def _run(self, connect, payload: bytes) -> None:
+        try:
+            self._conn = conn = connect()
+            for i in range(0, len(payload), _CHUNK):
+                conn.send(encode_frame(STDIN, payload[i:i + _CHUNK]))
+            conn.send(close_stdin_frame())
+            while True:
+                try:
+                    frame = conn.recv(timeout=1.0)
+                except TimeoutError:
+                    if self._killed.is_set():
+                        self._returncode = 137
+                        return
+                    continue
+                if isinstance(frame, str):
+                    frame = frame.encode()
+                if not frame:
+                    continue
+                ch, data = frame[0], frame[1:]
+                if ch in (STDOUT, STDERR):
+                    self._write(data)
+                elif ch == ERROR:
+                    self._returncode = parse_status(data)
+                    return
+        except ExecFailed as e:
+            self.error, self._returncode = e, 126
+        except Exception as e:  # connection reset, handshake failure, closed without status
+            self.error = ExecDisconnected(str(e) or type(e).__name__)
+            self._returncode = 137 if self._killed.is_set() else 255
+        finally:
+            try:
+                os.close(self._w)
+            except OSError:
+                pass
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+            self._done.set()
+
+    def poll(self):
+        return self._returncode if self._done.is_set() else None
+
+    def wait(self, timeout=None):
+        self._done.wait(timeout=timeout)
+        return self._returncode
+
+    def kill(self):
+        self._killed.set()
+        try:
+            self._on_kill()
+        finally:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+
+
+def connect_exec(client, pod: str, container: str, argv: list[str]) -> Connection:
+    from websockets.sync.client import connect
+    ctx = client.ssl_context()
+    return connect(client.exec_url(pod, container, argv), subprotocols=[SUBPROTOCOL],
+                   additional_headers=client.auth_headers(), ssl=ctx if not isinstance(ctx, bool) else None,
+                   ping_interval=30, max_size=None, open_timeout=30)
