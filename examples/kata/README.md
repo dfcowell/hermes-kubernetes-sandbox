@@ -15,8 +15,10 @@ not exposed. This is the recommended deployment when agents need `docker`.
   [kata-node-config.md](kata-node-config.md) (not optional).
 - A StorageClass that provisions **Block** volumes (`volumeMode: Block`, access mode `ReadWriteOncePod`); the Docker disk is a
   generic ephemeral volume that lives and dies with the Pod.
-- A StorageClass for the per-session **workspace** volumes (filesystem, `ReadWriteOnce`; the cluster
-  default is used unless `workspace_storage_class` is set). The workspace outlives the session's Pods; under Kata it
+- A StorageClass for the per-session **workspace** volumes (filesystem, access mode
+  `ReadWriteOncePod`, which needs a CSI driver with `SINGLE_NODE_SINGLE_WRITER`, or set
+  `workspace_access_mode: ReadWriteOnce`; the cluster default is used unless
+  `workspace_storage_class` is set; see the top-level README, "Storage requirements"). The workspace outlives the session's Pods; under Kata it
   is shared into the VM over virtio-fs (see the top-level README, "Workspace persistence").
 - A CNI that enforces NetworkPolicy. With Cilium, `socketLB.hostNamespaceOnly: true` is mandatory:
   without it Service connectivity from Kata Pods breaks (see networkpolicy.yaml).

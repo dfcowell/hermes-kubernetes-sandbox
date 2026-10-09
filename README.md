@@ -82,8 +82,25 @@ future `unused-since` stamps restart the clock; they never delete a volume. A se
 after its workspace was deleted gets a fresh, empty one. The plugin never deletes a PVC: its RBAC
 has `create`/`get`/`list`/`patch` on them, no `delete`.
 
-**Storage class.** Any `ReadWriteOnce` filesystem StorageClass; `workspace_storage_class` unset uses
-the cluster default. `workspace_size` is the PVC's request; changing it affects new workspaces only
+**Storage requirements.** A filesystem StorageClass (`workspace_storage_class`, unset = the
+cluster default) that supports the `workspace_access_mode`:
+
+- `ReadWriteOncePod` (default) is the guarantee that exactly one Pod uses the workspace at a time:
+  the scheduler keeps a second Pod Pending until the first is gone, and the kubelet enforces it.
+  It needs Kubernetes >= 1.29 and a CSI driver that supports `SINGLE_NODE_SINGLE_WRITER`, with
+  csi-provisioner >= v3.0 and csi-attacher >= v4.0 (verified on democratic-csi iSCSI with
+  provisioner v3.6.0 / attacher v4.4.0).
+- `ReadWriteOnce` is the fallback for non-CSI or older drivers. It is per **node**: two Pods on the
+  same node can both mount and write the volume, and only the plugin's graceful
+  replace-then-wait (below) prevents that.
+
+Symptom of a driver without RWOP support: the workspace PVC stays `Pending` with a provisioning or
+attach error naming the access mode, and commands fail with "not ready" errors. Set
+`workspace_access_mode: ReadWriteOnce` (new workspaces only: access modes are immutable, so an
+existing PVC is adopted as it is, with a warning in the gateway log; delete the stuck PVC to get
+one with the new mode).
+
+`workspace_size` is the PVC's request; changing it affects new workspaces only
 (existing PVCs keep their size). Budget the namespace quota for idle workspaces as well as live
 sessions (the example quotas show the arithmetic). Under Kata, the volume is mounted on the host
 and shared into the VM over virtio-fs (see Known limits). Workspaces are not backed up by this
@@ -126,7 +143,8 @@ for a nullable key means "unset".
 | `docker_disk_storage_class` | unset (required with `docker: true`) | StorageClass providing `volumeMode: Block` volumes. |
 | `docker_disk_size` | `30Gi` | Size of the per-Pod Docker disk. |
 | `workspace_size` | `10Gi` | Storage request of the session's `/workspace` PVC (new workspaces only). |
-| `workspace_storage_class` | unset (cluster default) | StorageClass of the workspace PVC: a `ReadWriteOnce` filesystem class. Env: `HERMES_K8S_WORKSPACE_STORAGE_CLASS`. |
+| `workspace_storage_class` | unset (cluster default) | StorageClass of the workspace PVC: a filesystem class supporting `workspace_access_mode`. Env: `HERMES_K8S_WORKSPACE_STORAGE_CLASS`. |
+| `workspace_access_mode` | `ReadWriteOncePod` | Access mode of new workspace PVCs: `ReadWriteOncePod` (one Pod at a time; needs CSI `SINGLE_NODE_SINGLE_WRITER`) or `ReadWriteOnce` (one node; fallback for older drivers). See Storage requirements. Env: `HERMES_K8S_WORKSPACE_ACCESS_MODE`. |
 | `workspace_retention` | `7d` | How long a workspace may sit unmounted before the janitor deletes it: seconds, or `<n>s`/`m`/`h`/`d` (`36h`, `7d`); must be positive. Written to each new PVC. Env: `HERMES_K8S_WORKSPACE_RETENTION`. |
 | `work_cpu` / `work_memory` | `100m` / `512Mi` | `work` CPU request; memory request and limit. |
 | `dind_cpu_request` / `dind_cpu_limit` / `dind_memory` | `500m` / `2` / `1Gi` | `dind` resources. |
@@ -179,12 +197,17 @@ kept.
   resourceVersion and fails the janitor's DELETE precondition. If the DELETE lands first, the plugin
   sees the PVC terminating and starts the session on a fresh, empty workspace (with the
   `environment_recreated` notice).
-- A Pod on a lost node holds its `ReadWriteOnce` workspace until the attach-detach controller
+- A Pod on a lost node holds its workspace volume until the attach-detach controller
   force-detaches the volume (about 6 minutes), on top of the Pod being stuck Terminating; until then
   the session's new Pod waits (`Multi-Attach`) and commands fail with retryable errors.
 - Replacing a Pod is always a graceful delete (10 s grace) and waits up to 90 s for the old Pod to
-  be gone before creating the new one, so two Pods never mount the workspace at once; if the old
-  one is still terminating the command fails with a retryable error.
+  be gone before creating the new one (a reused name cannot be created earlier anyway); if the old
+  one is still terminating the command fails with a retryable error. With `ReadWriteOncePod` the
+  volume itself refuses a second Pod; with `ReadWriteOnce` this wait is the only guard against two
+  Pods on one node sharing the workspace.
+- The plugin re-issues that 10 s graceful delete even on a Pod a node drain or eviction is already
+  deleting, which shortens their 30 s grace to 10 s. Harmless for the volume: the Pod object is only
+  removed after its volumes are unmounted.
 - Scripts are limited to 128 KiB (same as the docker backend).
 - The runner's `exec_id` (used to find and kill a command) is not validated in the Pod: it is an
   internal uuid, never user input.

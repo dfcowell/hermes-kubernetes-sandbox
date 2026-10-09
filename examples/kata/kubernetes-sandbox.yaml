@@ -5,8 +5,11 @@ runtime_class_name: kata
 docker: true
 docker_disk_storage_class: <your RWO block StorageClass>   # must support volumeMode: Block
 docker_disk_size: 30Gi
-# Each session's /workspace is a PVC that outlives its Pods (RWO filesystem volume).
-# workspace_storage_class: <your RWO filesystem StorageClass>   # unset = the cluster's default StorageClass
+# Each session's /workspace is a PVC (filesystem volume) that outlives its Pods.
+# workspace_storage_class: <your filesystem StorageClass>   # unset = the cluster's default StorageClass
+# ReadWriteOncePod: exactly one Pod mounts the workspace at a time (needs a CSI driver with
+# SINGLE_NODE_SINGLE_WRITER). Use ReadWriteOnce (per node) if your driver lacks it (see README.md).
+workspace_access_mode: ReadWriteOncePod
 workspace_size: 10Gi
 workspace_retention: 7d   # the janitor deletes a workspace this long after it was last mounted
 # Credentials of the hermes-sandbox-driver ServiceAccount, projected into the gateway container
