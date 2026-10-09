@@ -29,11 +29,21 @@ def decide(pod: dict, now: float, idle_seconds: int) -> str | None:
     md, ann = pod.get("metadata") or {}, (pod.get("metadata") or {}).get("annotations") or {}
     if (pod.get("status") or {}).get("phase") in ("Failed", "Succeeded"):
         return "finished"
-    created = parse(md.get("creationTimestamp")) or now
-    max_life = int(ann.get("hermes-sandbox/max-lifetime-seconds", "86400"))
+    created = parse(md.get("creationTimestamp"))
+    if created is None:
+        raise ValueError(f"unparseable creationTimestamp: {md.get('creationTimestamp')}")
+    max_life_str = ann.get("hermes-sandbox/max-lifetime-seconds", "86400")
+    try:
+        max_life = int(max_life_str)
+    except ValueError:
+        max_life = 86400
     if now - created > max_life:
         return "max-lifetime"
-    last = parse(ann.get("hermes-sandbox/last-used")) or created
+    last_str = ann.get("hermes-sandbox/last-used")
+    try:
+        last = parse(last_str) if last_str else created
+    except ValueError:
+        last = created
     if now - last > idle_seconds:
         return "idle"
     return None
@@ -48,25 +58,51 @@ def _api(method: str, path: str, ctx, token: str, body: dict | None = None) -> d
         return json.loads(r.read() or b"{}")
 
 
+def _load_api_context() -> tuple[str, object]:
+    """Load service account token and SSL context. Factored for testability."""
+    token = open(f"{SA}/token").read().strip()
+    ctx = ssl.create_default_context(cafile=f"{SA}/ca.crt")
+    return token, ctx
+
+
 def main() -> int:
     ns = os.environ.get("NAMESPACE", "agent-sandbox")
     idle = int(os.environ.get("IDLE_SECONDS", "3600"))
     dry = os.environ.get("DRY_RUN") == "1"
-    token = open(f"{SA}/token").read().strip()
-    ctx = ssl.create_default_context(cafile=f"{SA}/ca.crt")
+    token, ctx = _load_api_context()
     q = urllib.parse.urlencode({"labelSelector": SELECTOR})
     pods = _api("GET", f"/api/v1/namespaces/{ns}/pods?{q}", ctx, token).get("items", [])
     now = time.time()
+    had_error = False
     for p in pods:
-        name, reason = p["metadata"]["name"], decide(p, now, idle)
-        if reason is None:
-            print(f"keep {name}")
-            continue
-        print(f"{'would delete' if dry else 'delete'} {name}: {reason}")
-        if not dry:
-            _api("DELETE", f"/api/v1/namespaces/{ns}/pods/{name}", ctx, token, {"gracePeriodSeconds": 10})
+        try:
+            name = p["metadata"]["name"]
+            # Skip pods that are terminating
+            if p.get("metadata", {}).get("deletionTimestamp"):
+                print(f"skip {name}: terminating")
+                continue
+            reason = decide(p, now, idle)
+            if reason is None:
+                print(f"keep {name}")
+                continue
+            print(f"{'would delete' if dry else 'delete'} {name}: {reason}")
+            if not dry:
+                uid = p["metadata"]["uid"]
+                try:
+                    _api("DELETE", f"/api/v1/namespaces/{ns}/pods/{name}", ctx, token,
+                         {"gracePeriodSeconds": 10, "preconditions": {"uid": uid}})
+                except urllib.error.HTTPError as e:
+                    if e.code == 404:
+                        print(f"gone {name}")
+                    elif e.code == 409:
+                        print(f"skip {name}: changed")
+                    else:
+                        raise
+        except Exception as e:
+            print(f"error {p.get('metadata', {}).get('name', 'unknown')}: {e}")
+            had_error = True
     print(f"checked {len(pods)} sandbox pods")
-    return 0
+    return 1 if had_error else 0
 
 
 if __name__ == "__main__":
