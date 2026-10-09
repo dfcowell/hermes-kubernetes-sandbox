@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# Validate every example manifest against a live API server (server-side dry run).
-# CI runs it against kind; locally pass KUBECONFIG. --render-janitor regenerates
-# examples/kata/janitor.yaml's ConfigMap from janitor/janitor.py.
+# Validate every example manifest against a live API server.
+#   (no flag)         read-only: server-side dry run of every manifest; only creates the
+#                     namespaces it needs if they are missing. Safe against a real cluster.
+#   --apply           THROWAWAY CLUSTERS ONLY (CI kind): applies the example manifests for real,
+#                     then server-side dry-runs the Pods the plugin itself renders from the sample
+#                     settings (both docker_cli modes into the Kata namespace, docker: false into
+#                     the runc namespace). Any admission rejection fails the run.
+#   --render-janitor  regenerates examples/kata/janitor.yaml's ConfigMap from janitor/janitor.py.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 render_janitor() {
@@ -31,11 +36,57 @@ trap 'rm -f "$before"' EXIT
 cp examples/kata/janitor.yaml "$before"
 render_janitor
 diff -q "$before" examples/kata/janitor.yaml || { echo "janitor ConfigMap drifted: run --render-janitor"; exit 1; }
-# Namespaced objects need their namespace to exist for a server-side dry run.
-for ns in hermes agent-sandbox; do kubectl get ns "$ns" >/dev/null 2>&1 || kubectl create ns "$ns"; done
+rc=0
+mode="${1:-}"
+if [ -n "$mode" ] && [ "$mode" != "--apply" ]; then echo "usage: $0 [--apply|--render-janitor]"; exit 2; fi
+
+if [ "$mode" = "--apply" ]; then
+  # namespace first; the VAP before any Pod is created; hermes namespace for the janitor/RBAC objects.
+  kubectl get ns hermes >/dev/null 2>&1 || kubectl create ns hermes
+  kubectl apply -f examples/kata/runtimeclass.yaml -f examples/kata/namespace.yaml \
+    -f examples/kata/admission-policy.yaml
+  for f in examples/kata/*.yaml; do
+    case "$f" in */kubernetes-sandbox.yaml|*/runtimeclass.yaml|*/namespace.yaml|*/admission-policy.yaml) continue ;; esac
+    kubectl apply -f "$f" >/dev/null && echo "applied $f" || { echo "FAIL $f"; rc=1; }
+  done
+  kubectl apply -f examples/runc-no-docker/namespace.yaml
+  for f in examples/runc-no-docker/*.yaml; do
+    case "$f" in */kubernetes-sandbox.yaml|*/namespace.yaml) continue ;; esac
+    kubectl apply -f "$f" >/dev/null && echo "applied $f" || { echo "FAIL $f"; rc=1; }
+  done
+  sleep 5   # let the admission policy binding take effect
+  # Render real Pods with the plugin from the sample settings and dry-run them.
+  render() {  # render <example dir> <docker_cli>
+    PYTHONPATH=. python3 - "$1" "$2" <<'PY'
+import dataclasses, json, pathlib, sys, tempfile
+from kubernetes_sandbox.naming import Identity
+from kubernetes_sandbox.podspec import render_pod
+from kubernetes_sandbox.settings import load_settings
+example, cli = sys.argv[1:3]
+with tempfile.TemporaryDirectory() as home:
+    pathlib.Path(home, "kubernetes-sandbox.yaml").write_text(
+        pathlib.Path(example, "kubernetes-sandbox.yaml").read_text().replace("<your RWO block StorageClass>", "standard"))
+    s = load_settings(pathlib.Path(home))
+if s.docker:
+    s = dataclasses.replace(s, docker_cli=cli)
+print(json.dumps(render_pod(s, Identity("ci", "x"), now_iso="2026-01-01T00:00:00Z", created_by="ci")))
+PY
+  }
+  for spec in "examples/kata image-volume" "examples/kata init-copy" "examples/runc-no-docker -"; do
+    set -- $spec
+    render "$1" "$2" | kubectl create --dry-run=server -f - >/dev/null \
+      && echo "ok   plugin-rendered Pod ($1, docker_cli=$2)" || { echo "FAIL plugin-rendered Pod ($1, docker_cli=$2)"; rc=1; }
+  done
+  exit "$rc"
+fi
+
+# Read-only default. Namespaced objects need their namespace to exist for a server-side dry run.
+for ns in hermes agent-sandbox agent-sandbox-runc; do kubectl get ns "$ns" >/dev/null 2>&1 || kubectl create ns "$ns"; done
 for dir in examples/kata examples/runc-no-docker; do
   for f in "$dir"/*.yaml; do
     case "$f" in */kubernetes-sandbox.yaml) continue ;; esac
-    kubectl apply --dry-run=server -f "$f" >/dev/null && echo "ok   $f"
+    kubectl apply --dry-run=server -f "$f" >/dev/null || { echo "FAIL $f"; rc=1; continue; }
+    echo "ok   $f"
   done
 done
+exit "$rc"

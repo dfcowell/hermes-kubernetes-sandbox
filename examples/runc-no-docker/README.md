@@ -18,10 +18,11 @@ kubectl apply -f resourcequota.yaml
 kubectl apply -f rbac.yaml     # change `hermes` to your Hermes namespace
 ```
 
-Mount the `hermes-sandbox-driver-token` Secret into the gateway container as described in the
+Run the Hermes Pod as `hermes-sandbox-driver` with a projected token, as described in the
 [Kata README](../kata/README.md#give-the-gateway-the-driver-credentials), copy
-`kubernetes-sandbox.yaml` into `$HERMES_HOME`, and set `terminal.backend: kubernetes`.
+`kubernetes-sandbox.yaml` into `$HERMES_HOME`, and set `terminal.backend: kubernetes`. This example
+uses the namespace `agent-sandbox-runc` so it can coexist with the Kata example.
 
 There is no janitor here: the plugin deletes its Pod when a session ends and Pods carry a
 `max_lifetime_seconds` annotation, but if you want the safety net for crashed gateways, reuse
-`../kata/janitor.yaml` (it needs a janitor ServiceAccount and Role like the ones in `../kata/rbac.yaml`).
+`../kata/janitor.yaml` (set `NAMESPACE=agent-sandbox-runc` and add a janitor ServiceAccount, Role and RoleBinding for that namespace, like the ones in `../kata/rbac.yaml`).

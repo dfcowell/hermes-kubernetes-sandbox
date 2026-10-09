@@ -1,6 +1,6 @@
 # Kata node configuration
 
-Two node-level settings are required. Both were established by the spike that preceded this
+Three node-level settings are required (two in Kata, one in containerd). Both were established by the spike that preceded this
 plugin; skipping either causes VM out-of-memory kills under real load.
 
 ## 1. `default_memory = 512`
@@ -28,37 +28,71 @@ block_device_cache_set = true
 block_device_cache_direct = true
 ```
 
+## 3. containerd: `privileged_without_host_devices` (REQUIRED for the isolation claim)
+
+On the `kata` runtime in containerd's CRI configuration:
+
+```toml
+privileged_without_host_devices = true
+privileged_without_host_devices_all_devices_allowed = true
+```
+
+- `privileged_without_host_devices = true`: without it, containerd passes **every host device node**
+  into the VM for the privileged `dind` container. Agents could then read the host's disks from
+  inside the sandbox, defeating the point of the VM boundary.
+- `privileged_without_host_devices_all_devices_allowed = true`: a privileged `dockerd` needs the
+  loop and overlay devices *inside the guest*; with host devices withheld, this lets the guest's own
+  devices through.
+
 ## Applying it
 
 Both options go in the Kata `configuration.toml` for the runtime you register. Do not edit the
 file shipped inside the Kata release; use a copy or a drop-in so upgrades do not silently revert it.
 
+A change to the CRI configuration or to the Kata configuration needs containerd to restart (on
+Talos, a node reboot; the spike applied it with a reboot). It then applies to newly started Pods.
+
 ### Talos (Kata from a system extension)
 
-1. Copy the extension's configuration (for Cloud Hypervisor, `configuration-clh.toml`) to a
-   persistent path under `/var`, for example `/var/lib/kata-config/configuration-clh.toml`
-   (via a machine-config `files:` entry), and make the two edits above in the copy.
-2. Point containerd's Kata runtime at the copy with `ConfigPath` in a containerd config patch:
+1. Copy the extension's `configuration.toml` (Cloud Hypervisor build) to a persistent path under
+   `/var`, for example `/var/lib/kata-config/configuration.toml` (via a machine-config `files:`
+   entry), and make the Kata edits above in the copy.
+2. Point containerd's Kata runtime at the copy and set the device flags, using a CRI customization
+   part (`/etc/cri/conf.d/20-customization.part`):
 
    ```toml
    [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.kata]
-     runtime_type = "io.containerd.kata.v2"
+     privileged_without_host_devices = true
+     privileged_without_host_devices_all_devices_allowed = true
      [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.kata.options]
-       ConfigPath = "/var/lib/kata-config/configuration-clh.toml"
+       ConfigPath = "/var/lib/kata-config/configuration.toml"
    ```
-3. Apply the machine config; the setting takes effect for newly started Pods.
+3. Apply the machine config and reboot the node.
 
-### kata-deploy
+### kata-deploy (verify against your Kata version)
 
-kata-deploy installs the configuration under `/opt/kata/share/defaults/kata-containers/` and
-supports drop-in fragments in a `config.d/` directory next to the configuration file. Put the
-three lines above in a drop-in (for example `99-hermes-sandbox.toml`, under the `[hypervisor.clh]`
-table) on every Kata node, and select the Cloud Hypervisor shim (`kata-clh`) as the `handler` of
-the RuntimeClass if you do not alias it to `kata`.
+Written from the documented layout, not tested by the spike. The spike used Kata 3.28.0 with
+Cloud Hypervisor on Talos. kata-deploy installs configurations under
+`/opt/kata/share/defaults/kata-containers/` and supports drop-in fragments in a `config.d/`
+directory next to the configuration file: put the Kata edits in a drop-in on every Kata node and
+confirm they took effect. kata-deploy also writes the containerd runtime entry: **verify both
+`privileged_without_host_devices` lines are present in the resulting containerd configuration**
+(`containerd config dump | grep -A3 runtimes.kata`) and add them if not.
 
 ## Re-copy on every Kata upgrade
 
 A copied configuration does not follow upstream changes. After each Kata upgrade, diff the new
-shipped configuration against your copy, carry across new options, and confirm the three values
-are still set. Verify on a node with a running sandbox Pod:
-`ls -l /proc/<vmm pid>/fdinfo` on the disk fd should show flags `02140002` (`O_DIRECT` set).
+shipped configuration against your copy, carry across new options, and confirm the Kata values
+above are still set.
+
+## Verify on a node
+
+With a sandbox Pod running, find the VMM process (`cloud-hypervisor`) and its block-device fd, then
+read the flags:
+
+```sh
+ls -l /proc/<vmm pid>/fd            # find the fd that points at the Docker disk block device
+grep flags /proc/<vmm pid>/fdinfo/<fd>
+```
+
+`O_DIRECT` (octal 040000) must be set in `flags`; the spike saw `02140002`.

@@ -1,6 +1,7 @@
-# Driver ServiceAccount: what the Hermes gateway uses to manage sandbox Pods.
-# It lives in the Hermes namespace (`hermes` here -- CHANGE TO YOURS) and is granted rights
-# only inside `agent-sandbox`. The plugin never touches PVCs itself (the ephemeral-volume
+# Driver ServiceAccount: what the Hermes gateway uses to manage sandbox Pods. Run the Hermes Pod
+# AS this ServiceAccount (serviceAccountName), or, if it must keep its own, bind the Role below to
+# that ServiceAccount instead. It lives in the Hermes namespace (`hermes` here -- CHANGE TO YOURS)
+# and is granted rights only inside `agent-sandbox`. The plugin never touches PVCs itself (the ephemeral-volume
 # controller creates the Docker-disk PVC), so no PVC permissions are needed.
 apiVersion: v1
 kind: ServiceAccount
@@ -8,17 +9,6 @@ metadata:
   name: hermes-sandbox-driver
   namespace: hermes # change to your Hermes namespace
 automountServiceAccountToken: false
----
-# Long-lived token for the driver SA, mounted into the Hermes gateway container only
-# (see README.md). Holds token, ca.crt and namespace keys.
-apiVersion: v1
-kind: Secret
-metadata:
-  name: hermes-sandbox-driver-token
-  namespace: hermes # change to your Hermes namespace
-  annotations:
-    kubernetes.io/service-account.name: hermes-sandbox-driver
-type: kubernetes.io/service-account-token
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

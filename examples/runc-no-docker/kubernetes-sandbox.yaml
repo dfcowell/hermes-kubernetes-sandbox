@@ -1,5 +1,5 @@
 # Sample plugin settings: save as <HERMES_HOME>/kubernetes-sandbox.yaml
-namespace: agent-sandbox
+namespace: agent-sandbox-runc
 docker: false              # unprivileged Pod, no Docker-in-Docker, no RuntimeClass
 token_path: /var/run/secrets/hermes-sandbox/token
 ca_path: /var/run/secrets/hermes-sandbox/ca.crt

@@ -6,8 +6,10 @@ not exposed. This is the recommended deployment when agents need `docker`.
 
 ## Prerequisites
 
-- Kubernetes >= 1.30 (ValidatingAdmissionPolicy). Kubernetes >= 1.33 for image volumes (the
-  default `docker_cli: image-volume`); on older clusters set `docker_cli: init-copy`.
+- Kubernetes >= 1.30 (ValidatingAdmissionPolicy).
+- The default `docker_cli: image-volume` needs the `ImageVolume` feature enabled in your cluster and a
+  CRI that supports it (containerd >= 2.1 or CRI-O); verified on Kubernetes 1.36 with containerd 2.2.3.
+  Otherwise set `docker_cli: init-copy`.
 - Kata Containers with **Cloud Hypervisor** on the sandbox nodes, configured as in
   [kata-node-config.md](kata-node-config.md) (not optional).
 - A StorageClass that provisions **Block** volumes (`volumeMode: Block`, access mode `ReadWriteOncePod`); the Docker disk is a
@@ -36,28 +38,45 @@ Then put `kubernetes-sandbox.yaml` (edit the StorageClass) in `$HERMES_HOME` and
 
 ## Give the gateway the driver credentials
 
-The plugin talks to the API server with the `hermes-sandbox-driver` ServiceAccount, not with the
-gateway's own identity. Mount the token Secret from `rbac.yaml` through a projected volume on the
-**gateway container only**, so the terminal children Hermes spawns elsewhere never see it:
+The plugin talks to the API server as the `hermes-sandbox-driver` ServiceAccount (`rbac.yaml`:
+Pods, `pods/exec`, `pods/log` in `agent-sandbox` only). Run the Hermes Pod as that ServiceAccount, turn
+off the automatic token mount, and project a short-lived token plus the cluster CA on the **gateway
+container only**, so no other container in the Pod sees it. The plugin re-reads the token file on
+every request, so kubelet's rotation just works.
 
 ```yaml
 # in the Hermes Pod spec
+serviceAccountName: hermes-sandbox-driver
+automountServiceAccountToken: false
 volumes:
   - name: sandbox-driver
-    secret:
-      secretName: hermes-sandbox-driver-token
+    projected:
       defaultMode: 0440
-      items:
-        - {key: token, path: token}
-        - {key: ca.crt, path: ca.crt}
+      sources:
+        - serviceAccountToken: {path: token, expirationSeconds: 3600}
+        - configMap:
+            name: kube-root-ca.crt
+            items: [{key: ca.crt, path: ca.crt}]
 containers:
   - name: gateway              # only this container
     volumeMounts:
       - {name: sandbox-driver, mountPath: /var/run/secrets/hermes-sandbox, readOnly: true}
 ```
 
-This matches `token_path` / `ca_path` in `kubernetes-sandbox.yaml`. The Role grants rights in
-`agent-sandbox` only: Pods, `pods/exec`, `pods/log`.
+This matches `token_path` / `ca_path` in `kubernetes-sandbox.yaml`. Projected files are owned by root and
+group-readable per `defaultMode`; a non-root gateway needs `securityContext.fsGroup` (or `runAsGroup`) set
+so its group can read them.
+
+If the Hermes Pod must keep its own ServiceAccount, edit the RoleBinding in `rbac.yaml` to bind
+that ServiceAccount instead and project its token the same way.
+
+For a gateway running **outside the cluster**, mint a bounded token and write it to `token_path`:
+`kubectl -n hermes create token hermes-sandbox-driver --duration=24h` (renew before it expires).
+
+**Fallback, not recommended:** a long-lived token Secret
+(`type: kubernetes.io/service-account-token`, annotation `kubernetes.io/service-account.name:
+hermes-sandbox-driver`). It never expires, is not bound to the Pod, and anyone who can read Secrets in
+that namespace can use it. Prefer the projected token above.
 
 ## First manual janitor run
 
