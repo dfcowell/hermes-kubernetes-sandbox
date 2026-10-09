@@ -773,3 +773,165 @@ def test_non_json_2xx_body_is_a_connection_error():
     kube2.get_pod = _raising(json.JSONDecodeError("Expecting value", "<html/>", 0))
     with pytest.raises(EnvironmentConnectionError, match="JSONDecodeError"):
         e2.execute("echo hi")
+
+
+# --- fix round 1 ----------------------------------------------------------------------------------
+UNUSED = "hermes-sandbox/unused-since"
+
+
+def test_replace_path_deletes_gracefully_never_force():
+    kube = FakeKube(ready_after=0)
+    old = render_pod(S, ID, now_iso="2026-01-01T00:00:00Z", created_by="old")
+    old["metadata"]["labels"][LBL_TEMPLATE_HASH] = "stale"
+    kube.create_pod(old)
+    e, _, _ = _env(kube=kube)
+    e.ensure_pod()
+    assert kube.deletes and all(grace > 0 for _, grace in kube.deletes)
+
+
+def test_leftover_terminating_pod_is_deleted_gracefully_and_waited_out():
+    kube = FakeKube(ready_after=0)
+    kube.create_pod(render_pod(S, ID, now_iso="2026-01-01T00:00:00Z", created_by="old"))
+    kube.pods[ID.pod_name]["metadata"]["deletionTimestamp"] = "2026-10-09T00:00:00Z"   # cleanup() in flight
+    e, _, _ = _env(kube=kube)
+    e.ensure_pod()
+    assert kube.deletes == [(ID.pod_name, 10)]
+    assert e._pod_ready
+
+
+def test_previous_pod_still_terminating_is_retryable_and_never_creates():
+    kube = FakeKube(ready_after=0)
+    kube.create_pod(render_pod(S, ID, now_iso="2026-01-01T00:00:00Z", created_by="old"))
+    kube.pods[ID.pod_name]["metadata"]["deletionTimestamp"] = "2026-10-09T00:00:00Z"
+    kube.pods_linger = True
+    kube.calls.clear()
+    ticks = iter(range(0, 10**6, 5))
+    e = KubernetesEnvironment(settings=S, identity=ID, cwd="/workspace", timeout=30, client=kube,
+                              exec_connect=FakeExec(), clock=lambda: float(next(ticks)), sleep=lambda s: None)
+    with pytest.raises(EnvironmentConnectionError, match="still terminating") as ei:
+        e.ensure_pod()
+    assert "Retry" in ei.value.retry_hint
+    assert ("create", ID.pod_name) not in kube.calls
+    assert all(grace > 0 for _, grace in kube.deletes)
+
+
+def test_gone_wait_outlasts_grace_plus_vm_teardown():
+    assert envmod._GONE_TIMEOUT >= envmod._DELETE_GRACE + 60
+
+
+def test_cleanup_deletes_with_the_same_grace():
+    e, kube, _ = _env()
+    e.ensure_pod()
+    e.cleanup()
+    assert kube.deletes == [(ID.pod_name, envmod._DELETE_GRACE)] and envmod._DELETE_GRACE > 0
+
+
+def test_stamped_workspace_is_unstamped_before_the_pod_is_created():
+    kube = FakeKube()
+    kube.create_pvc(_claim())
+    kube.pvcs[ID.workspace_claim]["metadata"]["annotations"][UNUSED] = "2026-10-01T00:00:00Z"
+    e, _, _ = _env(kube=kube)
+    e.ensure_pod()
+    patches = [c for c in kube.calls if c[0] == "patch_pvc"]
+    assert patches == [("patch_pvc", ID.workspace_claim, {"metadata": {"annotations": {UNUSED: None}}})]
+    names = [c[0] for c in kube.calls]
+    assert names.index("patch_pvc") < names.index("create")
+    assert UNUSED not in kube.pvcs[ID.workspace_claim]["metadata"]["annotations"]
+
+
+def test_unstamped_workspace_is_not_patched():
+    kube = FakeKube()
+    kube.create_pvc(_claim())
+    e, _, _ = _env(kube=kube)
+    e.ensure_pod()
+    assert not any(c[0] == "patch_pvc" for c in kube.calls)
+
+
+def test_foreign_stamped_pvc_is_not_patched():
+    kube = FakeKube()
+    kube.create_pvc(_claim())
+    md = kube.pvcs[ID.workspace_claim]["metadata"]
+    md["annotations"][UNUSED] = "2026-10-01T00:00:00Z"
+    md["annotations"][ANN_SESSION_KEY] = "someone-else"
+    e, _, _ = _env(kube=kube)
+    with pytest.raises(EnvironmentConnectionError, match="workspace volume"):
+        e.ensure_pod()
+    assert not any(c[0] == "patch_pvc" for c in kube.calls)
+
+
+def test_unstamp_racing_the_janitor_delete_waits_and_creates_fresh():
+    kube = FakeKube(pvc_gone_after=1)
+    kube.create_pvc(_claim())
+    old_uid = kube.pvcs[ID.workspace_claim]["metadata"]["uid"]
+    kube.pvcs[ID.workspace_claim]["metadata"]["annotations"][UNUSED] = "2026-10-01T00:00:00Z"
+    real = kube.patch_pvc
+
+    def janitor_won(name, patch):     # the janitor's DELETE landed between our GET and PATCH
+        kube.pvcs[name]["metadata"]["deletionTimestamp"] = "2026-10-09T00:00:00Z"
+        return real(name, patch)
+
+    kube.patch_pvc = janitor_won
+    e, _, _ = _env(kube=kube)
+    e.ensure_pod()
+    new = kube.pvcs[ID.workspace_claim]["metadata"]
+    assert new["uid"] != old_uid and "deletionTimestamp" not in new
+    assert e._pod_ready
+
+
+def test_unstamp_forbidden_names_the_missing_verb():
+    from kubernetes_sandbox.kube import KubeError
+    kube = FakeKube()
+    kube.create_pvc(_claim())
+    kube.pvcs[ID.workspace_claim]["metadata"]["annotations"][UNUSED] = "2026-10-01T00:00:00Z"
+    kube.patch_pvc = _raising(KubeError(403, "Forbidden", "cannot patch persistentvolumeclaims"))
+    e, _, _ = _env(kube=kube)
+    with pytest.raises(EnvironmentConnectionError, match="403") as ei:
+        e.ensure_pod()
+    assert "patch" in ei.value.retry_hint and "persistentvolumeclaims" in ei.value.retry_hint
+    assert ("create", ID.pod_name) not in kube.calls
+
+
+@pytest.mark.parametrize("status,reason", [(400, "BadRequest"), (401, "Unauthorized"), (403, "Forbidden"),
+                                           (409, "Conflict")])
+def test_liveness_does_not_retry_client_errors(status, reason):
+    from kubernetes_sandbox.kube import KubeError
+    e, kube, _ = _env()
+    e.execute("echo hi")
+    calls = []
+
+    def fail(name):
+        calls.append(name)
+        raise KubeError(status, reason, "no")
+
+    kube.get_pod = fail
+    with pytest.raises(EnvironmentConnectionError, match=str(status)):
+        e.execute("echo hi")
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("exc", [
+    __import__("kubernetes_sandbox.kube", fromlist=["KubeError"]).KubeError(429, "TooManyRequests", "slow down"),
+    __import__("kubernetes_sandbox.kube", fromlist=["KubeError"]).KubeError(500, "InternalError", "x"),
+    __import__("httpx").ConnectError("refused"),
+])
+def test_liveness_retries_transport_5xx_and_429(exc):
+    e, kube, _ = _env()
+    e.execute("echo hi")
+    real, fails = kube.get_pod, [exc]
+
+    def flaky(name):
+        if fails:
+            raise fails.pop()
+        return real(name)
+
+    kube.get_pod = flaky
+    assert e.execute("echo hi")["returncode"] == 0
+
+
+def test_pvc_quota_hint_is_about_storage():
+    from kubernetes_sandbox.kube import QuotaExceeded
+    e, kube, _ = _env()
+    kube.create_pvc = _raising(QuotaExceeded(403, "Forbidden", "exceeded quota: requests.storage"))
+    with pytest.raises(EnvironmentConnectionError, match="capacity exhausted") as ei:
+        e.ensure_pod()
+    assert "workspace_retention" in ei.value.retry_hint and "quota" in ei.value.retry_hint

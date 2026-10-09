@@ -12,6 +12,8 @@ class FakeKube:
         self.pods, self.calls, self.ready_after, self.quota = {}, [], ready_after, quota
         self._gets = {}
         self.pvcs, self.pvc_gone_after, self._pvc_gets = {}, pvc_gone_after, {}
+        self.deletes = []              # (pod name, grace_seconds)
+        self.pods_linger = False       # True: a deleted Pod stays Terminating forever
 
     def _ready(self, pod):
         pod.setdefault("status", {})
@@ -39,6 +41,10 @@ class FakeKube:
 
     def delete_pod(self, name, grace_seconds=10):
         self.calls.append(("delete", name))
+        self.deletes.append((name, grace_seconds))
+        if self.pods_linger and name in self.pods:
+            self.pods[name]["metadata"]["deletionTimestamp"] = "2026-10-09T00:00:00Z"
+            return
         self.pods.pop(name, None)
 
     def list_pods(self, label_selector):
@@ -77,7 +83,16 @@ class FakeKube:
         return [copy.deepcopy(p) for p in self.pvcs.values()]
 
     def patch_pvc(self, name, merge_patch):
-        self.calls.append(("patch_pvc", name))
+        self.calls.append(("patch_pvc", name, copy.deepcopy(merge_patch)))
+        if name not in self.pvcs:
+            raise NotFound(404, "NotFound", name)
+        ann = self.pvcs[name]["metadata"].setdefault("annotations", {})
+        for k, v in ((merge_patch.get("metadata") or {}).get("annotations") or {}).items():
+            if v is None:
+                ann.pop(k, None)
+            else:
+                ann[k] = v
+        return copy.deepcopy(self.pvcs[name])
 
     def delete_pvc(self, name, *, uid):
         self.calls.append(("delete_pvc", name))

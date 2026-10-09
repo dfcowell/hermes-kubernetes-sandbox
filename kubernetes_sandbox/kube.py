@@ -109,9 +109,10 @@ class KubeClient:
     def list_pvcs(self, label_selector: str) -> list[dict]:
         return self._request("GET", self._pvcs(), params={"labelSelector": label_selector}).json().get("items", [])
 
-    def patch_pvc(self, name: str, merge_patch: dict) -> None:
-        self._request("PATCH", self._pvcs(name), content=json.dumps(merge_patch),
-                      headers={"Content-Type": "application/merge-patch+json"})
+    def patch_pvc(self, name: str, merge_patch: dict) -> dict:
+        """Returns the patched object (its deletionTimestamp shows a delete that won the race)."""
+        return self._request("PATCH", self._pvcs(name), content=json.dumps(merge_patch),
+                             headers={"Content-Type": "application/merge-patch+json"}).json()
 
     def delete_pvc(self, name: str, *, uid: str) -> None:
         """Deletes only the PVC with this uid (409 Conflict if the name now holds another)."""

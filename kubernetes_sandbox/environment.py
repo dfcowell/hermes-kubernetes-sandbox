@@ -16,7 +16,7 @@ from tools.environments.base import BaseEnvironment, EnvironmentConnectionError,
 
 from .exec_stream import ExecDisconnected, ExecFailed, StreamingExecHandle, connect_exec
 from .kube import Conflict, KubeClient, KubeError, NotFound, QuotaExceeded
-from .naming import ANN_LAST_USED, ANN_SESSION_KEY, LBL_PROFILE, LBL_TEMPLATE_HASH, MANAGED_BY, Identity, slug
+from .naming import ANN_LAST_USED, ANN_SESSION_KEY, ANN_UNUSED_SINCE, LBL_PROFILE, LBL_TEMPLATE_HASH, MANAGED_BY, Identity, slug
 from .podspec import identity_labels, render_pod, render_workspace_claim, template_hash
 from .runner import exec_argv, kill_argv, stdin_payload
 from .settings import Settings, interlock_error
@@ -32,6 +32,14 @@ def _mark_exiting():
 atexit.register(_mark_exiting)  # registered after Hermes's own hooks, so it runs before them (LIFO)
 
 _LAST_USED_EVERY = 60.0
+
+# Every plugin-side Pod delete is graceful: a force delete (grace 0) removes the API object while
+# the old containers still run and still hold the RWO workspace volume, so a same-name Pod would
+# mount it twice (same node) or stick on Multi-Attach (other node).
+_DELETE_GRACE = 10
+# How long to wait for a deleted Pod (or PVC) to be gone: the grace period, plus Kata VM teardown
+# and the volume unmount/detach that must finish before the API object disappears.
+_GONE_TIMEOUT = 90
 
 # Pod name -> uid of the Pods this process has served. Hermes reaches env.cleanup() on gateway stop and on degraded
 # eviction as well as from its idle reaper, and a fresh env then starts with no memory of the old
@@ -57,6 +65,13 @@ def _remember(name: str, uid: str | None) -> None:
 
 # JSONDecodeError: a 2xx whose body is not JSON (a proxy's HTML page). Its message carries only the position.
 _API_ERRORS = (KubeError, httpx.HTTPError, OSError, json.JSONDecodeError)
+
+
+def _retryable(e: BaseException) -> bool:
+    """Transport failures, 5xx and 429 may pass; 4xx client errors will not."""
+    if isinstance(e, httpx.TransportError):
+        return True
+    return isinstance(e, KubeError) and (e.status >= 500 or e.status == 429)
 
 
 def _api_error(what: str, e: BaseException) -> EnvironmentConnectionError:
@@ -134,7 +149,7 @@ class KubernetesEnvironment(BaseEnvironment):
 
     def _wait_gone(self, name: str, get=None) -> bool:
         get = get or self._client.get_pod
-        deadline = self._clock() + 60
+        deadline = self._clock() + _GONE_TIMEOUT
         while self._clock() < deadline:
             try:
                 get(name)
@@ -163,7 +178,14 @@ class KubernetesEnvironment(BaseEnvironment):
                 except Conflict:
                     continue  # created meanwhile (another gateway): GET and adopt it
                 except QuotaExceeded as e:
-                    raise self._capacity_error(e) from None
+                    raise EnvironmentConnectionError(
+                        f"Sandbox capacity exhausted in namespace {self._s.namespace}: {e}",
+                        retry_hint="Storage frees when an idle workspace expires (workspace_retention); retry "
+                                   "later, or ask the operator to raise the namespace's storage quota.") from None
+            if not (pvc.get("metadata") or {}).get("deletionTimestamp") and self._owns_claim(pvc):
+                pvc = self._unstamp(pvc)
+            if pvc is None:
+                continue  # deleted between GET and PATCH
             if (pvc.get("metadata") or {}).get("deletionTimestamp"):
                 self._notify("waiting for the expired workspace volume to be deleted")
                 if not self._wait_gone(name, self._client.get_pvc):
@@ -179,6 +201,25 @@ class KubernetesEnvironment(BaseEnvironment):
             return
         raise EnvironmentConnectionError(f"Could not create workspace volume {name}: it keeps changing",
                                          retry_hint="Retry the command.")
+
+    def _unstamp(self, pvc: dict) -> dict | None:
+        """Clear the janitor's idle stamp before every Pod start, so a short session between two
+        janitor runs still restarts the retention clock. Patching also changes the PVC's
+        resourceVersion, which makes a janitor DELETE based on an older listing fail its precondition."""
+        if ANN_UNUSED_SINCE not in ((pvc.get("metadata") or {}).get("annotations") or {}):
+            return pvc
+        name = self._id.workspace_claim
+        try:
+            return self._client.patch_pvc(name, {"metadata": {"annotations": {ANN_UNUSED_SINCE: None}}})
+        except NotFound:
+            return None
+        except KubeError as e:
+            if e.status == 403:
+                raise EnvironmentConnectionError(
+                    f"Could not mark workspace volume {name} in use: Kubernetes API error {e}"[:500],
+                    retry_hint="The driver Role needs the `patch` verb on persistentvolumeclaims "
+                               "(see the example rbac.yaml).") from None
+            raise
 
     def _capacity_error(self, e: KubeError) -> EnvironmentConnectionError:
         return EnvironmentConnectionError(
@@ -213,7 +254,8 @@ class KubernetesEnvironment(BaseEnvironment):
         """Runs on the caller's thread before every command, never inside Hermes's bounded
         worker: a Pod that vanished (janitor, OOM, drain), stopped being Ready, or was replaced
         under the same name (uid change) is re-ensured before the command is started. A failing
-        API call is retried once: a transient 5xx must not make Hermes evict the environment."""
+        API call is retried once if it may pass (transport error, 5xx, 429): a transient blip must
+        not make Hermes evict the environment."""
         for attempt in range(2):
             try:
                 pod = self._client.get_pod(self._id.pod_name)
@@ -222,7 +264,7 @@ class KubernetesEnvironment(BaseEnvironment):
                 self._pod_ready = False
                 return
             except _API_ERRORS as e:
-                if attempt:
+                if attempt or not _retryable(e):
                     raise _api_error(f"Could not check sandbox Pod {self._id.pod_name}", e) from None
                 self._sleep(1)
         if not (self._matches(pod) and _ready(pod)) or _uid(pod) != self._pod_uid:
@@ -261,8 +303,11 @@ class KubernetesEnvironment(BaseEnvironment):
                 # this session's own Pod is a recreate even if this process never served it.
                 if ((pod.get("metadata") or {}).get("annotations") or {}).get(ANN_SESSION_KEY) == self._id.session_key:
                     replaced_own = True
-                self._client.delete_pod(name, grace_seconds=0)
-                self._wait_gone(name)
+                self._client.delete_pod(name, grace_seconds=_DELETE_GRACE)
+                if not self._wait_gone(name):
+                    raise EnvironmentConnectionError(
+                        f"Previous sandbox Pod {name} is still terminating",
+                        retry_hint="Retry shortly; a new sandbox Pod is created once the old one is gone.")
             except NotFound:
                 pass
             self._check_capacity()
@@ -394,7 +439,7 @@ class KubernetesEnvironment(BaseEnvironment):
         if _PROCESS_EXITING:
             return  # detach: the next gateway adopts the Pod, or the janitor reaps it
         try:
-            self._client.delete_pod(self._id.pod_name, grace_seconds=10)
+            self._client.delete_pod(self._id.pod_name, grace_seconds=_DELETE_GRACE)
         except Exception:
             pass
         self._pod_ready = False

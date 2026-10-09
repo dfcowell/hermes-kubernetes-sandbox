@@ -12,6 +12,8 @@ ANN_LAST_USED = PREFIX + "last-used"
 ANN_MAX_LIFETIME = PREFIX + "max-lifetime-seconds"
 ANN_CREATED_BY = PREFIX + "created-by"
 ANN_WS_RETENTION = PREFIX + "workspace-retention-seconds"
+# Set by the janitor on an unmounted workspace PVC; cleared by the plugin on every Pod start.
+ANN_UNUSED_SINCE = PREFIX + "unused-since"
 LBL_PROFILE = PREFIX + "profile"
 LBL_KEY_HASH = PREFIX + "key-hash"
 LBL_TEMPLATE_HASH = PREFIX + "template-hash"

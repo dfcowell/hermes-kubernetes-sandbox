@@ -158,3 +158,9 @@ def test_delete_pvc_sends_uid_precondition_and_maps_conflict(settings):
 def test_non_json_2xx_body_raises_json_decode_error(settings):
     with pytest.raises(json.JSONDecodeError):
         _client(settings, lambda r: httpx.Response(200, text="<html>proxy</html>")).get_pod("p")
+
+
+def test_patch_pvc_returns_the_updated_object(settings):
+    body = {"metadata": {"name": "c", "deletionTimestamp": "2026-10-09T00:00:00Z"}}
+    got = _client(settings, lambda r: httpx.Response(200, json=body)).patch_pvc("c", {"metadata": {}})
+    assert got == body
