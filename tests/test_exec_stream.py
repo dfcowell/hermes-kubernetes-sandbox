@@ -80,3 +80,49 @@ def test_kill_calls_on_kill_and_closes():
     h.kill()
     assert killed.is_set()
     assert h.wait(timeout=5) is not None and conn.closed
+
+
+def test_kill_before_connect_sends_nothing():
+    gate = threading.Event()
+    conn = FakeConn([_status(0)], end_with=ConnectionError())
+
+    def connect():
+        gate.wait(5)
+        return conn
+
+    h = StreamingExecHandle(connect, b"PAYLOAD", on_kill=lambda: None)
+    h.kill()
+    gate.set()
+    assert h.wait(timeout=5) == 137
+    assert conn.sent == [] and conn.closed
+    assert h.error is None  # a requested kill is not a disconnect
+
+
+def test_kill_during_chatty_stream():
+    class Chatty(FakeConn):
+        def recv(self, timeout=None):
+            threading.Event().wait(0.05)
+            return encode_frame(STDOUT, b"x")
+
+    conn = Chatty([])
+    h = StreamingExecHandle(lambda: conn, b"", on_kill=lambda: None)
+    threading.Event().wait(0.2)
+    h.kill()
+    assert h.wait(timeout=2) == 137 and conn.closed
+
+
+def test_blocking_on_kill_does_not_block_kill():
+    release, ran = threading.Event(), threading.Event()
+
+    def slow():
+        ran.set()
+        release.wait(5)
+
+    h = StreamingExecHandle(lambda: FakeConn([]), b"", on_kill=slow)
+    import time
+    t = time.monotonic()
+    h.kill()
+    assert time.monotonic() - t < 0.5
+    assert ran.wait(2)
+    release.set()
+    assert h.wait(timeout=5) == 137

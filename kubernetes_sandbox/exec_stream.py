@@ -73,16 +73,19 @@ class StreamingExecHandle:
     def _run(self, connect, payload: bytes) -> None:
         try:
             self._conn = conn = connect()
+            if self._killed.is_set():
+                self._returncode = 137
+                return
             for i in range(0, len(payload), _CHUNK):
                 conn.send(encode_frame(STDIN, payload[i:i + _CHUNK]))
             conn.send(close_stdin_frame())
             while True:
+                if self._killed.is_set():
+                    self._returncode = 137
+                    return
                 try:
                     frame = conn.recv(timeout=1.0)
                 except TimeoutError:
-                    if self._killed.is_set():
-                        self._returncode = 137
-                        return
                     continue
                 if isinstance(frame, str):
                     frame = frame.encode()
@@ -120,14 +123,14 @@ class StreamingExecHandle:
 
     def kill(self):
         self._killed.set()
+        # on_kill may be a slow second exec; never block the caller. _run owns closing the connection.
+        threading.Thread(target=self._safe_on_kill, daemon=True).start()
+
+    def _safe_on_kill(self) -> None:
         try:
             self._on_kill()
-        finally:
-            if self._conn is not None:
-                try:
-                    self._conn.close()
-                except Exception:
-                    pass
+        except Exception:
+            pass
 
 
 def connect_exec(client, pod: str, container: str, argv: list[str]) -> Connection:
