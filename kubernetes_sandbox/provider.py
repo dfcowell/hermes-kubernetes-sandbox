@@ -45,8 +45,9 @@ class KubernetesProvider(TerminalEnvironmentProvider):
 
     @property
     def skip_container_guards(self) -> bool:
-        # Approvals stay on: the plugin does not yet forward credentials, so Hermes's
-        # dangerous-command approvals are kept rather than skipped for this container backend.
+        # Hermes skips its dangerous-command approval prompts for backends it treats as isolated.
+        # Keep them on: the session's workspace persists across Pods and the sandbox has
+        # internet egress, so a destructive command here still has consequences.
         return False
 
     @property
