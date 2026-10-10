@@ -70,9 +70,12 @@ if [ "$mode" = "--apply" ]; then
     echo "FAIL $what (not in effect after 60 s)"; return 1
   }
   vap_rejects() {  # rejected BY THE POLICY (quota or PSA rejections do not count)
-    kubectl -n agent-sandbox run vap-probe --image=busybox --restart=Never --dry-run=server \
-        --overrides='{"spec":{"automountServiceAccountToken":false}}' 2>&1 \
-      | grep -q "must set runtimeClassName kata"
+    # Capture first: the rejection makes kubectl exit non-zero, which under pipefail would fail a
+    # `kubectl … | grep -q` pipeline even when grep matches.
+    local out
+    out=$(kubectl -n agent-sandbox run vap-probe --image=busybox --restart=Never --dry-run=server \
+        --overrides='{"spec":{"automountServiceAccountToken":false}}' 2>&1) || true
+    grep -q "must set runtimeClassName kata" <<<"$out"
   }
   quota_ready() { [ -n "$(kubectl -n "$1" get resourcequota -o jsonpath='{.items[*].status.hard}')" ]; }
   wait_for "admission policy rejects a Pod without runtimeClassName" vap_rejects || exit 1
