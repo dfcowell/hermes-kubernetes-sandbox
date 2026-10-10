@@ -5,7 +5,7 @@ script and the caller's stdin arrive on the exec's stdin as
 stdin.
 
 The exec's stdin is NEVER closed. On Kata 3.28 / containerd 2.2.3 / Kubernetes 1.36.5 an exec
-whose stdin has been closed loses all output the process writes after the close (dev cluster,
+whose stdin has been closed loses all output the process writes after the close (measured with
 `echo one; sleep 0.3; echo two` x5: stdin closed 0/5 printed "two", stdin left open 5/5), which
 also swallowed Hermes's trailing cwd marker. So EOF for the command is made here, in-band.
 

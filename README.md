@@ -5,7 +5,7 @@ each session's commands in its own Kubernetes Pod — optionally with its own Do
 agents can run container-based test suites — instead of on the gateway host.
 
 **Status: alpha.** Tested end to end on Kata Containers 3.28 (Cloud Hypervisor) / containerd
-2.2.3 / Kubernetes 1.36.5, including a 3.5 h soak. The runc example is validated against the API
+2.2.3 / Kubernetes 1.36.5, including a 3.5 h load test. The runc example is validated against the API
 server but has not been live-tested.
 
 ## How it works
@@ -44,7 +44,7 @@ Then set up the cluster side from one of the examples:
 
 - [`examples/kata/`](examples/kata/README.md) — **recommended**: each sandbox is a Kata
   Containers micro-VM with Docker-in-Docker. RuntimeClass sizing, admission policy, network
-  policy, quota, RBAC, janitor and the node configuration the soak proved necessary.
+  policy, quota, RBAC, janitor and the node configuration that load testing showed to be necessary.
 - [`examples/runc-no-docker/`](examples/runc-no-docker/README.md) — the simplest deployment: an
   unprivileged Pod on the default runtime, no Docker, Pod Security `restricted`.
 
@@ -228,7 +228,7 @@ kept.
   do not (see Workspace persistence).
 - Under Kata the workspace PVC is a host filesystem shared into the VM over virtio-fs, so its writes
   go through the host page cache. The live gate measures its memory cost under heavy writes; the
-  soak numbers in the Kata example predate it.
+  memory figures in the Kata example were measured without it.
 - A workspace PVC with a matching name but foreign labels or session key is never mounted: the
   command fails with a non-retryable error until an operator removes that PVC.
 - An expired workspace races a returning session only inside the janitor's list-to-delete

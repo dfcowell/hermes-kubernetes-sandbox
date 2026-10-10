@@ -534,7 +534,7 @@ def test_capacity_ignores_finished_and_terminating_pods():
     assert e._pod_ready
 
 
-# --- persistent workspace volume (Task 12) -----------------------------------------------------
+# --- persistent workspace volume -----------------------------------------------------
 def _claim(settings=S, ident=ID):
     from kubernetes_sandbox.podspec import render_workspace_claim
     return render_workspace_claim(settings, ident)

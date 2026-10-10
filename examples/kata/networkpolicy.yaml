@@ -60,6 +60,6 @@ spec:
 # MANDATORY with Cilium: set `socketLB.hostNamespaceOnly: true` in the Cilium Helm values.
 # Cilium's socket-level load balancer translates Service addresses in the connect() syscall,
 # which never happens for traffic leaving a Kata VM (the guest has its own kernel), so Service
-# connectivity from Kata Pods breaks: in the spike 3 of 6 Service checks failed until it was set.
+# connectivity from Kata Pods breaks: in testing, 3 of 6 Service checks failed until it was set.
 # It is a connectivity requirement, not a policy bypass.
 # ---------------------------------------------------------------------------

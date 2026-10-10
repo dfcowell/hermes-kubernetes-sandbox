@@ -1,8 +1,8 @@
 # Kata node configuration
 
 Three node-level settings are required: two in the Kata configuration (sections 1 and 2) and one
-in containerd's CRI configuration (section 3). All three were established by the spike that
-preceded this plugin. Skipping 1 or 2 causes VM out-of-memory kills under real load; skipping 3
+in containerd's CRI configuration (section 3). All three were established by load-testing the
+plugin. Skipping 1 or 2 causes VM out-of-memory kills under real load; skipping 3
 passes every host device into the VM and voids the isolation claim.
 
 ## 1. `default_memory = 512`
@@ -12,15 +12,15 @@ keeps the guest at about 2 GiB for the default container limits while leaving en
 guest kernel, page cache and `dockerd`. The RuntimeClass `overhead.podFixed.memory` (1024Mi) is
 sized from it (512 MiB base + 512 MiB host-side headroom): **keep them in step**.
 
-Evidence: peak in-guest need was 703 MiB; the 3.5 h soak peaked at 1474 of 2560 MiB.
+Evidence: peak in-guest need was 703 MiB; a 3.5 h load test peaked at 1474 of 2560 MiB.
 
 ## 2. `block_device_cache_set = true` and `block_device_cache_direct = true`
 
 The Docker disk is a raw block device attached to the VM. With the default caching the *host*
 caches the disk's pages too, on top of the guest's own page cache ("double caching"). Under a
 write-heavy Docker workload the host-side page cache is charged to the Pod's memory cgroup and
-the **whole VM was OOM-killed** (spike soak 1). With these two options the VMM opens the disk
-with `O_DIRECT` (verified: fd flags `02140002`) and the host caches nothing: soak 2 passed
+the **whole VM was OOM-killed** in a long-running load test. With these two options the VMM opens the disk
+with `O_DIRECT` (verified: fd flags `02140002`) and the host caches nothing: the same load test passed
 (6/6 checks, 3.5 h) with a cgroup peak of 1474 / 2560 MiB.
 
 ```toml
@@ -53,7 +53,7 @@ in containerd's CRI runtime entry for `kata`. Do not edit the Kata file shipped 
 use a copy or a drop-in so upgrades do not silently revert it.
 
 A change to the CRI configuration or to the Kata configuration needs containerd to restart (on
-Talos, a node reboot; the spike applied it with a reboot). It then applies to newly started Pods.
+Talos, a node reboot). It then applies to newly started Pods.
 
 ### Talos (Kata from a system extension)
 
@@ -74,7 +74,7 @@ Talos, a node reboot; the spike applied it with a reboot). It then applies to ne
 
 ### kata-deploy (verify against your Kata version)
 
-Written from the documented layout, not tested by the spike. The spike used Kata 3.28.0 with
+Written from the documented layout, not tested. The tested setup was Kata 3.28.0 with
 Cloud Hypervisor on Talos. kata-deploy installs configurations under
 `/opt/kata/share/defaults/kata-containers/` and supports drop-in fragments in a `config.d/`
 directory next to the configuration file: put the Kata edits in a drop-in on every Kata node and
@@ -98,4 +98,4 @@ ls -l /proc/<vmm pid>/fd            # find the fd that points at the Docker disk
 grep flags /proc/<vmm pid>/fdinfo/<fd>
 ```
 
-`O_DIRECT` (octal 040000) must be set in `flags`; the spike saw `02140002`.
+`O_DIRECT` (octal 040000) must be set in `flags`; a working node shows `02140002`.

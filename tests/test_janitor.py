@@ -312,7 +312,7 @@ def test_janitor_imports_urllib_error_itself():
     assert "urllib.error" in imported
 
 
-# --- workspace PVC pass (Task 12) ---------------------------------------------------------------
+# --- workspace PVC pass ---------------------------------------------------------------
 WEEK = 604800
 UNUSED, RETENTION = "hermes-sandbox/unused-since", "hermes-sandbox/workspace-retention-seconds"
 

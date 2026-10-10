@@ -45,7 +45,8 @@ class KubernetesProvider(TerminalEnvironmentProvider):
 
     @property
     def skip_container_guards(self) -> bool:
-        # Approvals stay on until the K11/K12 conditional skip lands.
+        # Approvals stay on: the plugin does not yet forward credentials, so Hermes's
+        # dangerous-command approvals are kept rather than skipped for this container backend.
         return False
 
     @property

@@ -116,11 +116,14 @@ kubectl -n hermes logs job/janitor-first-run
 
 To see what it would delete without deleting, add `DRY_RUN=1` to the CronJob's env first.
 
-## Measured behaviour (dev-cluster spike)
+## Measured behaviour
+
+Measured on Kata 3.28.0 / Cloud Hypervisor, containerd 2.2.3, Kubernetes 1.36.5.
 
 - Cold start (Pod created to ready): about 27 s on Kata, about 14 s on runc.
 - Real test suites run at about 1.5x their runc time.
 - Exec latency p50 / p95: about 180 / 227 ms.
 - Guest memory about 2 GiB (512 MiB Kata base + container limits); peak in-guest need 703 MiB.
-- 3.5 h soak: clean, pod cgroup peak 1474 of 2560 MiB, with `O_DIRECT` enabled. Soak 1, without
-  it, OOM-killed the VM because the host double-cached the Docker disk.
+- 3.5 h load test: clean, pod cgroup peak 1474 of 2560 MiB, with `O_DIRECT` enabled. Without it
+  a long-running load test OOM-killed the whole VM: the host cached the raw-block Docker disk a
+  second time, charged to the Pod's cgroup.

@@ -2,7 +2,7 @@
 
 The exec's stdin is never closed (no CLOSE frame on channel 255): on Kata 3.28 / containerd 2.2.3
 / Kubernetes 1.36.5 an exec whose stdin has been closed loses every byte of output written after
-the close (dev cluster, `echo one; sleep 0.3; echo two` x5: 0/5 got "two" with stdin closed, 5/5
+the close (measured with `echo one; sleep 0.3; echo two` x5: 0/5 got "two" with stdin closed, 5/5
 with it left open; the server sends "one", then the channel-3 status, then hangs up). The runner
 (runner.py) delimits the caller's stdin in-band instead; the connection is closed only after the
 status frame arrives.
