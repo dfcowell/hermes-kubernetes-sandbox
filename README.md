@@ -216,6 +216,28 @@ kept.
 - `scripts/e2e.py <settings.yaml>` — live end-to-end check against a real cluster (never run in
   CI). From the repo root: `.venv/bin/python scripts/e2e.py my-settings.yaml`.
 
+## Why no Kubernetes client library?
+
+`kubernetes_sandbox/kube.py` is a small REST client and `exec_stream.py` a websocket exec client,
+rather than a dependency on the official `kubernetes` package or another client library:
+
+- **No new dependencies.** A Hermes plugin is installed as a directory, with no dependency
+  installation step. The plugin uses only `httpx`, `websockets` and PyYAML, which Hermes already
+  ships as pinned core dependencies. A client library would have to become a Hermes core
+  dependency, or be fetched from PyPI at runtime, unpinned, on a security-sensitive path.
+- **The API surface is small.** Get, list, create, patch and delete for Pods and PVCs (PVC
+  deletes carry uid/resourceVersion preconditions), plus exec. The token file is re-read on every request, so a
+  rotating projected ServiceAccount token works without a refresh mechanism.
+- **Exec needs exact control of the stream.** The script and its stdin travel in-band, the status
+  frame carries the exit code, and stdin is deliberately never closed (see Known limits). That is
+  simpler to guarantee on a raw `v5.channel.k8s.io` websocket than through a library's stream
+  wrapper.
+
+The trade-off: authentication is a bearer token plus a CA bundle only. Kubeconfig exec plugins,
+OIDC refresh and client certificates are not supported; out-of-cluster gateways use a minted
+token (see "Out-of-cluster gateways"). The client is one module behind the interface the tests
+fake, so replacing it with a library later stays contained.
+
 ## Known limits
 
 - **The exec's stdin is never closed.** On Kata 3.28 / containerd 2.2.3 / Kubernetes 1.36.5 an
