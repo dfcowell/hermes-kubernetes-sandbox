@@ -16,16 +16,16 @@ class _Result:
         self.returncode, self.stdout, self.stderr, self.elapsed = returncode, stdout, stderr, elapsed
 
 
-def _run(script, stdin_data=None, *, login=False, timeout=30, wait=60):
+def _run(script, stdin_data=None, *, login=False, timeout=30, wait=60, env_script="", payload=None, proc_env=None):
     """Run the RUNNER like the websocket exec does: write the payload and leave stdin OPEN
     (the exec's stdin is never closed), wait for the runner to exit, then close stdin."""
     exec_id = uuid.uuid4().hex[:12]
     proc = subprocess.Popen(exec_argv(exec_id, login=login, timeout=timeout), stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=proc_env)
     out, err = [], []
     readers = [threading.Thread(target=lambda f=f, b=b: b.append(f.read()), daemon=True)
                for f, b in ((proc.stdout, out), (proc.stderr, err))]
-    payload = stdin_payload(script, stdin_data)
+    payload = payload if payload is not None else stdin_payload(script, stdin_data, env_script)
 
     def write():
         try:
@@ -135,9 +135,124 @@ def test_nul_bytes_in_stdin_data_pass_through_exactly():
     assert p.stdout.strip() == b"3"
 
 
-def test_stdin_payload_carries_both_lengths():
-    assert stdin_payload("echo ü", "ab") == b"7\n2\necho \xc3\xbcab"
-    assert stdin_payload("true", None) == b"4\n0\ntrue"
+def test_stdin_payload_carries_all_three_lengths():
+    assert stdin_payload("echo ü", "ab") == b"7\n2\n0\necho \xc3\xbcab"
+    assert stdin_payload("true", None) == b"4\n0\n0\ntrue"
+    assert stdin_payload("true", "IN", "export A=1\n") == b"4\n2\n11\ntrueexport A=1\nIN"
+
+
+def test_stdin_payload_rejects_nul_in_env():
+    with pytest.raises(ValueError, match="NUL"):
+        stdin_payload("true", None, "export A=x\0y\n")
+
+
+SECRET_PROBE = ('echo "v=$HS_TEST_SECRET"; '
+                'for f in /proc/[0-9]*/cmdline; do tr "\\0" " " < "$f" 2>/dev/null; echo; done '
+                '| grep -c -F -f <(printf "%s\\n" "$HS_TEST_SECRET") || true')
+
+
+def test_forwarded_env_reaches_the_command_but_no_process_argv():
+    secret = "s3cr3t-" + uuid.uuid4().hex
+    p, _ = _run(SECRET_PROBE, env_script=f"export HS_TEST_SECRET={secret}\n")
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.decode().splitlines() == [f"v={secret}", "0"]
+
+
+def test_secret_probe_sees_a_secret_that_is_in_argv():
+    # Negative control: the probe is not vacuous. The same secret placed in the command's own argv
+    # (the script is an argument of the command's bash) is found.
+    secret = "s3cr3t-" + uuid.uuid4().hex
+    p, _ = _run(f": {secret}; " + SECRET_PROBE, env_script=f"export HS_TEST_SECRET={secret}\n")
+    assert p.returncode == 0, p.stderr
+    lines = p.stdout.decode().splitlines()
+    assert lines[0] == f"v={secret}" and int(lines[1]) >= 1
+
+
+def test_hostile_values_keep_framing_and_never_execute(tmp_path):
+    import shlex
+    marker = tmp_path / "ran"
+    values = {
+        "HS_TEST_Q": "'",
+        "HS_TEST_BS": "trailing\\",
+        "HS_TEST_BREAK": f"x'\ntouch {marker}\n: '",
+        "HS_TEST_FRAME": "\n4\n0\n0\ntrue\n",
+        "HS_TEST_SUBST": f"$(touch {marker})${{IFS}}`touch {marker}`;touch {marker}|&",
+        "HS_TEST_MB": "ünïcødé\u2028—",
+        "HS_TEST_DASH": "-n",
+        "HS_TEST_EMPTY": "",
+    }
+    env = "".join(f"export {k}={shlex.quote(v)}\n" for k, v in values.items())
+    script = "".join(f'printf "%s\\0" "${k}"; ' for k in values) + "cat"
+    p, _ = _run(script, "STDIN-AFTER", env_script=env)
+    assert p.returncode == 0, p.stderr
+    *got, tail = p.stdout.split(b"\0")
+    assert [g.decode() for g in got] == list(values.values()) and tail == b"STDIN-AFTER"
+    assert not marker.exists()
+
+
+def test_forwarded_env_survives_a_login_shell():
+    p, _ = _run('printf %s "$HS_TEST_LOGIN"', login=True, env_script="export HS_TEST_LOGIN='l o g'\n")
+    assert p.returncode == 0, p.stderr
+    assert p.stdout == b"l o g"
+
+
+def test_env_section_is_exact_and_never_expanded(tmp_path):
+    import shlex
+    marker = tmp_path / "expanded"
+    value = f"a'b\"c\n$(touch {marker}) `touch {marker}` $HOME"
+    p, _ = _run('printf %s "$HS_TEST_VALUE"', env_script=f"export HS_TEST_VALUE={shlex.quote(value)}\n")
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.decode() == value and not marker.exists()
+
+
+def test_env_section_unsets_names_the_scope_lacks():
+    p, _ = _run('echo "${HS_TEST_GONE-unset}"', env_script="unset HS_TEST_GONE\n",
+                proc_env={**os.environ, "HS_TEST_GONE": "leaked-from-another-profile"})
+    assert p.stdout == b"unset\n"
+
+
+MALFORMED_ENV = {
+    # every section carries the value V in a line bash may echo back on error; every failure but the
+    # unterminated quote is NOT the last command of the section
+    "unterminated-quote": "export HS_TEST_A='V\n",
+    "syntax-error-mid-section": "export HS_TEST_S='V'; )\nexport HS_TEST_A=1\n",
+    "readonly-unset-first": "unset UID\nexport HS_TEST_A='V'\n",
+    "readonly-export-first": "export EUID='V'\nexport HS_TEST_A=1\n",
+    "readonly-own-var-unset": "readonly HS_TEST_RO='V'; unset HS_TEST_RO\nexport HS_TEST_A=1\n",
+}
+
+
+@pytest.mark.parametrize("posix", [False, True], ids=["bash", "POSIXLY_CORRECT"])
+@pytest.mark.parametrize("name", list(MALFORMED_ENV))
+def test_malformed_env_section_fails_closed(tmp_path, name, posix):
+    # A builder bug must not run the command with a partial environment (R-H18), whichever line of the
+    # section fails, and bash's error message must not echo a forwarded value into the command output.
+    marker = tmp_path / "ran"
+    value = "v4lue-" + uuid.uuid4().hex
+    env_script = MALFORMED_ENV[name].replace("V", value)
+    proc_env = {**os.environ, "POSIXLY_CORRECT": "1"} if posix else None
+    p, exec_id = _run(f"touch {marker}", "IN", env_script=env_script, proc_env=proc_env)
+    assert p.returncode == 125 and not marker.exists(), p.stderr
+    assert value.encode() not in p.stdout + p.stderr
+    assert b"forwarded environment did not evaluate" in p.stderr
+    assert not list(pathlib.Path("/tmp").glob(f"hermes-exec-{exec_id}.*"))
+
+
+def test_posixly_correct_reaches_the_command_unchanged():
+    p, _ = _run('printf "%s|%s" "${POSIXLY_CORRECT-unset}" "$HS_TEST_A"', env_script="export HS_TEST_A=ok\n",
+                proc_env={**os.environ, "POSIXLY_CORRECT": "y"})
+    assert p.returncode == 0, p.stderr
+    assert p.stdout == b"y|ok"
+
+
+def test_bad_env_length_is_rejected():
+    p, _ = _run("", payload=b"4\n0\nx\ntrue")
+    assert p.returncode == 125
+
+
+def test_env_section_with_stdin_data_keeps_both_exact():
+    p, _ = _run('printf "%s|" "$HS_TEST_A"; cat', "STDIN-BYTES", env_script="export HS_TEST_A=ok\n")
+    assert p.stdout == b"ok|STDIN-BYTES"
 
 
 def test_large_stdin_reaches_command_exactly_and_ends_in_eof():
@@ -179,7 +294,7 @@ def _run_no_reader(script, data: bytes, *, watchdog=60):
     dog.start()
     try:
         body = script.encode()
-        proc.stdin.write(f"{len(body)}\n{len(data)}\n".encode() + body + data)
+        proc.stdin.write(f"{len(body)}\n{len(data)}\n0\n".encode() + body + data)
         proc.stdin.flush()  # stdin stays open, as on the real exec
         out = proc.stdout.read()
         err = proc.stderr.read()
@@ -240,7 +355,7 @@ def test_kill_during_spooling_stops_the_command_before_it_starts(tmp_path):
     proc = subprocess.Popen(exec_argv(exec_id, login=False, timeout=30), stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        proc.stdin.write(f"{len(script)}\n10\n".encode() + script + b"12345")  # half the stdin
+        proc.stdin.write(f"{len(script)}\n10\n0\n".encode() + script + b"12345")  # half the stdin
         proc.stdin.flush()
         time.sleep(0.3)
         subprocess.run(kill_argv(exec_id), check=True, timeout=10)  # no pgid yet: tombstone only
