@@ -1,5 +1,8 @@
+import hashlib
+import json
+
 from kubernetes_sandbox.naming import Identity
-from kubernetes_sandbox.podspec import render_pod, template_hash
+from kubernetes_sandbox.podspec import _HASH_CLAIM, _spec, render_pod, render_workspace_claim, template_hash
 from kubernetes_sandbox.settings import Settings
 
 KATA = Settings(runtime_class_name="kata", docker_disk_storage_class="block-ephemeral")
@@ -179,3 +182,34 @@ def test_workspace_claim_access_mode_follows_the_setting():
     assert render_workspace_claim(Settings(docker=False), ident)["spec"]["accessModes"] == ["ReadWriteOncePod"]
     rwo = Settings(docker=False, workspace_access_mode="ReadWriteOnce")
     assert render_workspace_claim(rwo, ident)["spec"]["accessModes"] == ["ReadWriteOnce"]
+
+
+LABELLED = Settings(runtime_class_name="kata", docker_disk_storage_class="block-ephemeral",
+                    extra_pod_labels={"example.com/forge-egress": "true"})
+
+
+def test_extra_labels_on_the_pod_not_on_the_workspace():
+    ident = Identity("mars", "sess-1")
+    pod = render_pod(LABELLED, ident, now_iso="x", created_by="x")
+    assert pod["metadata"]["labels"]["example.com/forge-egress"] == "true"
+    assert "example.com/forge-egress" not in render_workspace_claim(LABELLED, ident)["metadata"]["labels"]
+
+
+def test_template_hash_unchanged_without_extra_labels():
+    old = hashlib.sha256(json.dumps({"spec": _spec(KATA, _HASH_CLAIM), "annotations": {}},
+                                    sort_keys=True).encode()).hexdigest()[:8]
+    assert template_hash(KATA) == old  # upgrading the plugin must not replace every existing Pod
+
+
+def test_template_hash_covers_extra_labels():
+    assert template_hash(LABELLED) != template_hash(KATA)
+    other = Settings(runtime_class_name="kata", docker_disk_storage_class="block-ephemeral",
+                     extra_pod_labels={"example.com/forge-egress": "false"})
+    assert template_hash(other) != template_hash(LABELLED)
+
+
+def test_plugin_labels_win_over_extra_labels():
+    sneaky = Settings(runtime_class_name="kata", docker_disk_storage_class="block-ephemeral",
+                      extra_pod_labels={"hermes-sandbox/profile": "someone-else"})  # bypasses load_settings
+    pod = render_pod(sneaky, Identity("mars", "sess-1"), now_iso="x", created_by="x")
+    assert pod["metadata"]["labels"]["hermes-sandbox/profile"] == "mars"
