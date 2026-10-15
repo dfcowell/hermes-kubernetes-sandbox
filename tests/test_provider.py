@@ -79,3 +79,11 @@ def test_name_is_valid_and_not_a_builtin():
     # _reject_builtin_collision raises unconditionally (it is only the collision callback), so check the set.
     assert KubernetesProvider.name not in BUILTIN_BACKEND_NAMES
     assert re.fullmatch(r"[a-z0-9_]+", KubernetesProvider.name)
+
+
+def test_approvals_stay_on_with_forwarded_credentials(_isolated_hermes_home):
+    _write(_isolated_hermes_home, "docker: false\nforward_env: [FORGE_TOKEN]\n"
+           "git_credentials: [{url: https://f.example.com, username: u, password_env: FORGE_TOKEN}]\n")
+    p = KubernetesProvider()
+    p._settings()  # the credential settings load
+    assert p.skip_container_guards is False  # K12: approvals stay on (amendment §2.6 item 4)

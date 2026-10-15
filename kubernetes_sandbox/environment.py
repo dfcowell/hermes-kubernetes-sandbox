@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import logging
 import os
+import re
 import shlex
 import socket
 import threading
@@ -14,7 +15,9 @@ import uuid
 
 import httpx
 from tools.environments.base import BaseEnvironment, EnvironmentConnectionError, get_activity_callback
+from tools.environments.remote_common import resolve_passthrough_env
 
+from .credentials import credential_names, git_config_env
 from .exec_stream import ExecDisconnected, ExecFailed, StreamingExecHandle, connect_exec
 from .kube import Conflict, KubeClient, KubeError, NotFound, QuotaExceeded
 from .naming import ANN_LAST_USED, ANN_SESSION_KEY, ANN_UNUSED_SINCE, LBL_PROFILE, LBL_TEMPLATE_HASH, MANAGED_BY, Identity, slug
@@ -53,6 +56,20 @@ _GONE_TIMEOUT = 90
 _SERVED_PODS: dict[str, str | None] = {}
 _SERVED_LOCK = threading.Lock()
 _ACCESS_WARNED: set[str] = set()  # workspace PVCs already warned about an access-mode mismatch
+_WITHHELD_WARNED: set[str] = set()  # forward_env names already warned about as Hermes credentials
+_SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")  # fullmatch: `$` would accept a trailing newline
+
+
+def _hermes_credential(name: str) -> bool:
+    """Hermes's own check for the credentials it manages (provider and tool API keys, GITHUB_TOKEN/GH_TOKEN,
+    adapter secrets, AUXILIARY_*_API_KEY ...), the one its env passthrough registry applies. Hermes lets an
+    EXPLICIT forward (docker_forward_env) bypass it as an operator opt-in; this plugin does not, so a
+    forward_env entry can never tunnel one of them into a sandbox. Fails closed."""
+    try:
+        from tools.env_passthrough import _is_hermes_provider_credential
+        return bool(_is_hermes_provider_credential(name))
+    except Exception:
+        return True
 
 
 def _served(name: str) -> bool:
@@ -138,6 +155,9 @@ class KubernetesEnvironment(BaseEnvironment):
         self._had_pod = False
         self._pod_uid: str | None = None
         self._bootstrap_attempted = False
+        # Names whose values are forwarded per exec (K11). Monotonic: a name stays excluded from the session
+        # snapshot after its value is gone, so an old value cannot persist there.
+        self._exec_env_names: set[str] = set(settings.forward_env) | credential_names(settings.git_credentials)
 
     # --- Pod lifecycle -------------------------------------------------------
     def _notify(self, msg: str) -> None:
@@ -425,6 +445,44 @@ class KubernetesEnvironment(BaseEnvironment):
             self.init_session()
         self._touch_last_used()
 
+    def _exec_env_script(self) -> str:
+        """The forwarded environment of ONE exec, as shell lines the runner evals (never in an argv, the exec
+        URL or the Pod spec). Values come from Hermes's own resolver: `terminal.env_passthrough` plus the
+        `forward_env` setting (minus Hermes-managed credentials), the routed profile's value under
+        multiplexing; names the scope lacks come back to be unset, so another profile's value can never
+        linger. Plus the git credential configuration. Only shell-name-valid names are emitted and every
+        value is shell-quoted; a NUL in a value is refused by stdin_payload."""
+        forward = []
+        for name in self._s.forward_env:
+            if _hermes_credential(name):
+                if name not in _WITHHELD_WARNED:
+                    _WITHHELD_WARNED.add(name)
+                    log.warning("forward_env: %s is a credential Hermes manages; it is not forwarded into "
+                                "sandboxes", name)
+                continue
+            forward.append(name)
+        values, unset = resolve_passthrough_env(forward)
+        values = {k: v for k, v in values.items() if isinstance(k, str) and _SHELL_NAME.fullmatch(k)}
+        values.update(git_config_env(self._s.git_credentials))
+        unset = {n for n in unset if isinstance(n, str) and _SHELL_NAME.fullmatch(n) and n not in values}
+        self._exec_env_names.update(values)
+        self._exec_env_names.update(unset)
+        lines = [f"export {k}={shlex.quote(v)}" for k, v in sorted(values.items())]
+        if unset:
+            lines.append("unset " + " ".join(sorted(unset)))
+        return "".join(line + "\n" for line in lines)
+
+    def _snapshot_excluded_passthrough_names(self) -> tuple[str, ...]:
+        """Forwarded and git names never enter the session snapshot, multiplexed or not: the snapshot is a
+        file in the Pod's /tmp that every later command sources."""
+        names = set(super()._snapshot_excluded_passthrough_names()) | self._exec_env_names
+        try:
+            from tools.env_passthrough import get_all_passthrough
+            names.update(n for n in get_all_passthrough() if isinstance(n, str))
+        except Exception:
+            pass
+        return tuple(sorted(n for n in names if _SHELL_NAME.fullmatch(n)))
+
     def _start(self, cmd_string, login, timeout, stdin_data):
         exec_id = uuid.uuid4().hex[:12]
         pod = self._id.pod_name
@@ -436,7 +494,7 @@ class KubernetesEnvironment(BaseEnvironment):
                 pass
 
         handle = self._exec(pod, "work", exec_argv(exec_id, login=login, timeout=timeout),
-                            stdin_payload(cmd_string, stdin_data), on_kill)
+                            stdin_payload(cmd_string, stdin_data, self._exec_env_script()), on_kill)
         return handle
 
     def _run_bash(self, cmd_string, *, login=False, timeout=120, stdin_data=None):

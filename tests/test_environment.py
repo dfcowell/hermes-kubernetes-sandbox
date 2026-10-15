@@ -1,3 +1,4 @@
+import json
 import threading
 
 import pytest
@@ -7,7 +8,8 @@ from kubernetes_sandbox.environment import KubernetesEnvironment
 from kubernetes_sandbox.kube import Conflict
 from kubernetes_sandbox.naming import ANN_SESSION_KEY, LBL_TEMPLATE_HASH, Identity
 from kubernetes_sandbox.podspec import render_pod, template_hash
-from kubernetes_sandbox.settings import Settings
+from kubernetes_sandbox.runner import stdin_payload
+from kubernetes_sandbox.settings import GitCredential, Settings
 from tools.environments.base import EnvironmentConnectionError
 
 S = Settings(runtime_class_name="kata", docker_disk_storage_class="b", ready_timeout_seconds=5)
@@ -1010,3 +1012,118 @@ def test_wait_for_process_forwards_every_base_keyword(monkeypatch):
 
     assert e._wait_for_process(Proc(), 7, output="collector", bounded_capture=True)["returncode"] == 0
     assert seen == {"timeout": 7, "output": "collector", "bounded_capture": True}
+
+
+FWD = Settings(runtime_class_name="kata", docker_disk_storage_class="b", ready_timeout_seconds=5,
+               forward_env=("HS_FWD_TEST",),
+               git_credentials=(GitCredential("https://forge.example.test", "my-bot", "HS_FWD_TEST"),))
+
+
+def _sections(payload: bytes):
+    n, i, en, rest = payload.split(b"\n", 3)
+    n, i, en = int(n), int(i), int(en)
+    return rest[:n], rest[n:n + en], rest[n + en:]
+
+
+def test_forwarded_values_travel_only_in_the_env_section(monkeypatch):
+    monkeypatch.setenv("HS_FWD_TEST", "v4lue-xyz")
+    e, kube, ex = _env(settings=FWD)
+    e.ensure_pod()
+    e._run_bash("echo hi", login=False, timeout=10).wait(timeout=5)
+    run = ex.runs[-1]
+    script, env, _ = _sections(run["payload"])
+    assert b"export HS_FWD_TEST=v4lue-xyz\n" in env and b"export GIT_CONFIG_COUNT=2\n" in env
+    assert b"v4lue-xyz" not in script
+    assert "v4lue-xyz" not in " ".join(run["argv"])
+    assert "v4lue-xyz" not in json.dumps(kube.pods[ID.pod_name]) and "v4lue-xyz" not in json.dumps(kube.pvcs)
+
+
+def test_names_without_a_value_are_unset(monkeypatch):
+    monkeypatch.delenv("HS_FWD_TEST", raising=False)
+    import kubernetes_sandbox.environment as em
+    monkeypatch.setattr(em, "resolve_passthrough_env", lambda fwd: ({}, {"HS_FWD_TEST", "bad name"}))
+    e, _, _ = _env(settings=FWD)
+    script = e._exec_env_script()
+    assert "unset HS_FWD_TEST\n" in script and "bad name" not in script
+
+
+def test_forwarded_names_are_excluded_from_the_snapshot_without_multiplexing():
+    e, _, _ = _env(settings=FWD)
+    names = e._snapshot_excluded_passthrough_names()
+    assert {"HS_FWD_TEST", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_1", "GIT_TERMINAL_PROMPT"} <= set(names)
+
+
+def test_snapshot_file_never_holds_a_forwarded_value(tmp_path, monkeypatch):
+    """Real bash: the wrapper Hermes builds, run by the real RUNNER with the env section, re-dumps the session
+    snapshot after the command. The snapshot must keep an ordinary export and drop the forwarded one."""
+    from test_runner import _run
+    monkeypatch.setenv("HS_FWD_TEST", "s3cr3t-snap")
+    e, _, _ = _env(settings=FWD)
+    snap = tmp_path / "snap.sh"
+    snap.write_text("")
+    e._snapshot_path = str(snap)
+    e._snapshot_ready = True
+    wrapped = e._wrap_command('export OTHER_VAR=kept; echo "in=$HS_FWD_TEST"', str(tmp_path))
+    p, _ = _run("", payload=stdin_payload(wrapped, None, e._exec_env_script()))
+    assert "in=s3cr3t-snap" in p.stdout.decode(), p.stderr
+    text = snap.read_text()
+    assert "OTHER_VAR" in text and "s3cr3t-snap" not in text
+
+
+# R-H18 (3): hostile values reach the command verbatim through the real RUNNER (bash) and never execute.
+_HOSTILE = ["$(touch {m})", "`touch {m}`", "'; touch {m}; '", "\"; touch {m}; \"", "a\nexport X=1; touch {m}",
+            "\\n\\x41 $HOME ${{PATH}} !! *", "-n", "tab\there", "ünï ☃", "x' \"$(touch {m})\" '", "", " lead"]
+
+
+@pytest.mark.parametrize("raw", _HOSTILE)
+def test_hostile_forwarded_value_arrives_verbatim_and_never_executes(tmp_path, monkeypatch, raw):
+    from test_runner import _run
+    marker = tmp_path / "pwned"
+    value = raw.format(m=marker)
+    monkeypatch.setenv("HS_FWD_TEST", value)
+    e, _, _ = _env(settings=FWD)
+    env_script = e._exec_env_script()
+    p, _ = _run('printf %s "$HS_FWD_TEST"', env_script=env_script)
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.decode("utf-8") == value
+    assert not marker.exists()
+
+
+def test_env_section_names_are_validated_and_values_quoted(monkeypatch):
+    import kubernetes_sandbox.environment as em
+    monkeypatch.setattr(em, "resolve_passthrough_env", lambda fwd: (
+        {"HS_FWD_TEST": "a b", "bad name": "x", "X;touch /tmp/y": "x", "OK\n": "x"}, {"also bad"}))
+    e, _, _ = _env(settings=FWD)
+    script = e._exec_env_script()
+    lines = script.splitlines()
+    assert "export HS_FWD_TEST='a b'" in lines
+    assert all(line.startswith(("export GIT_", "export HS_FWD_TEST=")) for line in lines), lines
+    assert "bad" not in script and "touch" not in script and "OK" not in script
+
+
+def test_nul_in_a_forwarded_value_is_refused_end_to_end(monkeypatch):
+    import kubernetes_sandbox.environment as em
+    monkeypatch.setattr(em, "resolve_passthrough_env", lambda fwd: ({"HS_FWD_TEST": "se\0cret"}, set()))
+    e, _, ex = _env(settings=FWD)
+    e.ensure_pod()
+    with pytest.raises(ValueError, match="NUL") as ei:
+        e._run_bash("echo hi", login=False, timeout=10)
+    assert "cret" not in str(ei.value)
+    assert ex.runs == []
+
+
+@pytest.mark.parametrize("secret", ["OPENAI_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "AUXILIARY_VISION_API_KEY"])
+def test_hermes_declared_secret_in_forward_env_is_not_forwarded(monkeypatch, secret):
+    """R-H17 (b): against Hermes v0.22.1's real resolve_passthrough_env and credential predicates, no mock.
+    Hermes treats explicit forwards (docker_forward_env) as an operator opt-in that bypasses its scrub, so the
+    plugin applies Hermes's own credential check to forward_env before asking Hermes to resolve it."""
+    from tools.environments.remote_common import resolve_passthrough_env
+    monkeypatch.setenv(secret, "s3cr3t-declared")
+    monkeypatch.setenv("HS_FWD_TEST", "plain-value")
+    assert resolve_passthrough_env((secret,))[0] == {secret: "s3cr3t-declared"}  # Hermes alone WOULD forward it
+    s = Settings(runtime_class_name="kata", docker_disk_storage_class="b", forward_env=(secret, "HS_FWD_TEST"))
+    e, _, _ = _env(settings=s)
+    script = e._exec_env_script()
+    assert "s3cr3t-declared" not in script and secret not in script
+    assert "export HS_FWD_TEST=plain-value\n" in script
+    assert secret in e._snapshot_excluded_passthrough_names()

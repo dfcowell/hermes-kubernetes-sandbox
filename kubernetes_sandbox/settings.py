@@ -116,11 +116,15 @@ _GIT_URL = re.compile(r"https://([A-Za-z0-9.-]+)(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]
 _GIT_USER = re.compile(r"[A-Za-z0-9._@+-]{1,128}")
 # Variables a sandbox must never receive from the gateway: they change how the shell, the dynamic
 # loader or Python start (BASH_ENV, LD_PRELOAD, PYTHONSTARTUP, ...) or point the sandbox at the
-# gateway's cluster or Hermes itself. Secrets Hermes knows about (provider API keys and the like) are
-# withheld by Hermes's own passthrough scrub, not by this list.
+# gateway's cluster or Hermes itself; bash's readonly and special variables, whose assignment fails the
+# runner's environment section (it fails closed, so every command would); and the runner's own `__hs_`
+# variables. Secrets Hermes knows about (provider API keys, GITHUB_TOKEN and the like) are withheld per
+# exec by the environment, with Hermes's own credential check, not by this list.
 _DENIED_ENV = frozenset({"BASH_ENV", "ENV", "PATH", "IFS", "SHELLOPTS", "BASHOPTS", "PS4", "PROMPT_COMMAND",
-                         "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME"})
-_DENIED_ENV_PREFIXES = ("LD_", "KUBERNETES_", "HERMES_")
+                         "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "POSIXLY_CORRECT",
+                         "UID", "EUID", "PPID", "BASHPID", "BASH_VERSINFO", "GROUPS", "BASH_ARGV0",
+                         "BASH_SUBSHELL"})
+_DENIED_ENV_PREFIXES = ("LD_", "KUBERNETES_", "HERMES_", "__hs_")
 
 
 def _env_name(where: str, name) -> str:
