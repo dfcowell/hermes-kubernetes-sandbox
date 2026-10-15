@@ -1148,6 +1148,26 @@ def test_litellm_keys_are_withheld_per_exec_even_when_implicit(_isolated_hermes_
     assert {"LITELLM_API_KEY", "LITELLM_MASTER_KEY"} <= set(e._snapshot_excluded_passthrough_names())
 
 
+def test_hindsight_keys_are_withheld_per_exec_even_when_implicit(_isolated_hermes_home, monkeypatch):
+    """R-H21: Hermes v0.22.1 does not classify HINDSIGHT_* (its catalog memory provider's keys), so the plugin
+    withholds them itself on every exec: implicitly via terminal.env_passthrough and via a forward_env that
+    bypassed settings validation. Memory keys never enter a sandbox."""
+    (_isolated_hermes_home / "config.yaml").write_text(
+        "terminal:\n  env_passthrough: [HINDSIGHT_API_TENANT_API_KEY, HS_IMPLICIT]\n")
+    monkeypatch.setenv("HINDSIGHT_API_TENANT_API_KEY", "hs-tenant-implicit")
+    monkeypatch.setenv("HINDSIGHT_API_KEY", "hs-api-explicit")
+    monkeypatch.setenv("HS_IMPLICIT", "implicit-ok")
+    from tools.env_passthrough import _is_hermes_provider_credential, get_all_passthrough
+    assert {"HINDSIGHT_API_TENANT_API_KEY", "HS_IMPLICIT"} <= get_all_passthrough()  # precondition: Hermes passes
+    assert not _is_hermes_provider_credential("HINDSIGHT_API_TENANT_API_KEY")  # precondition: Hermes doesn't classify
+    s = Settings(runtime_class_name="kata", docker_disk_storage_class="b", forward_env=("HINDSIGHT_API_KEY",))
+    e, _, _ = _env(settings=s)
+    script = e._exec_env_script()
+    assert "export HS_IMPLICIT=implicit-ok\n" in script
+    assert "hs-tenant" not in script and "hs-api" not in script and "HINDSIGHT_" not in script
+    assert {"HINDSIGHT_API_TENANT_API_KEY", "HINDSIGHT_API_KEY"} <= set(e._snapshot_excluded_passthrough_names())
+
+
 def test_real_predicate_forwards_an_unclassified_token():
     """R-H20 I3 positive control against Hermes's REAL credential check: a homelab token name Hermes does not
     manage IS forwarded. A Hermes bump that starts classifying *_TOKEN shapes fails here."""

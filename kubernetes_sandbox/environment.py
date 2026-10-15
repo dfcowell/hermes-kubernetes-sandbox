@@ -61,11 +61,11 @@ _WITHHELD_WARNED: set[str] = set()  # names already warned about as withheld cre
 def _withheld(name: str) -> bool:
     """A credential that never enters a sandbox: a name Hermes manages (its own check, the one its env
     passthrough registry applies: provider and tool API keys, GITHUB_TOKEN/GH_TOKEN, adapter secrets,
-    AUXILIARY_*_API_KEY ...), or an LLM proxy key Hermes does not classify (WITHHELD_ENV_PREFIXES). Hermes lets
-    an EXPLICIT forward (docker_forward_env) bypass its check; this plugin does not. Fails closed: a name that
-    cannot be classified is withheld, logged every time, and never marked as warned."""
+    AUXILIARY_*_API_KEY ...), or an LLM proxy or memory key Hermes does not classify (WITHHELD_ENV_PREFIXES).
+    Hermes lets an EXPLICIT forward (docker_forward_env) bypass its check; this plugin does not. Fails closed: a
+    name that cannot be classified is withheld, logged every time, and never marked as warned."""
     if name.startswith(WITHHELD_ENV_PREFIXES):
-        reason = "is an LLM proxy key"
+        reason = "is an LLM proxy or memory key"
     else:
         try:
             from tools.env_passthrough import _is_hermes_provider_credential

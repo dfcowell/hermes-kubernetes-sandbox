@@ -288,7 +288,9 @@ def test_trailing_newline_rejected(_isolated_hermes_home, text, why):
                                   "UID", "EUID", "PPID", "BASHPID", "BASH_VERSINFO", "GROUPS", "BASH_ARGV0",
                                   "BASH_SUBSHELL", "POSIXLY_CORRECT",
                                   # LiteLLM proxy keys, which Hermes does not classify (R-H20)
-                                  "LITELLM_API_KEY", "LITELLM_MASTER_KEY"])
+                                  "LITELLM_API_KEY", "LITELLM_MASTER_KEY",
+                                  # Hindsight memory keys, which Hermes does not classify (R-H21)
+                                  "HINDSIGHT_API_TENANT_API_KEY", "HINDSIGHT_API_KEY"])
 def test_denied_env_names(_isolated_hermes_home, name):
     with pytest.raises(SettingsError, match=f"forward_env: {name} cannot be forwarded"):
         _load(_isolated_hermes_home, f"forward_env: [{name}]\n")
