@@ -6,7 +6,6 @@ import datetime as dt
 import json
 import logging
 import os
-import re
 import shlex
 import socket
 import threading
@@ -23,7 +22,7 @@ from .kube import Conflict, KubeClient, KubeError, NotFound, QuotaExceeded
 from .naming import ANN_LAST_USED, ANN_SESSION_KEY, ANN_UNUSED_SINCE, LBL_PROFILE, LBL_TEMPLATE_HASH, MANAGED_BY, Identity, slug
 from .podspec import identity_labels, render_pod, render_workspace_claim, template_hash
 from .runner import exec_argv, kill_argv, stdin_payload
-from .settings import Settings, interlock_error
+from .settings import _SHELL_NAME, WITHHELD_ENV_PREFIXES, Settings, interlock_error
 
 log = logging.getLogger(__name__)
 _PROCESS_EXITING = False
@@ -56,20 +55,31 @@ _GONE_TIMEOUT = 90
 _SERVED_PODS: dict[str, str | None] = {}
 _SERVED_LOCK = threading.Lock()
 _ACCESS_WARNED: set[str] = set()  # workspace PVCs already warned about an access-mode mismatch
-_WITHHELD_WARNED: set[str] = set()  # forward_env names already warned about as Hermes credentials
-_SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")  # fullmatch: `$` would accept a trailing newline
+_WITHHELD_WARNED: set[str] = set()  # names already warned about as withheld credentials
 
 
-def _hermes_credential(name: str) -> bool:
-    """Hermes's own check for the credentials it manages (provider and tool API keys, GITHUB_TOKEN/GH_TOKEN,
-    adapter secrets, AUXILIARY_*_API_KEY ...), the one its env passthrough registry applies. Hermes lets an
-    EXPLICIT forward (docker_forward_env) bypass it as an operator opt-in; this plugin does not, so a
-    forward_env entry can never tunnel one of them into a sandbox. Fails closed."""
-    try:
-        from tools.env_passthrough import _is_hermes_provider_credential
-        return bool(_is_hermes_provider_credential(name))
-    except Exception:
-        return True
+def _withheld(name: str) -> bool:
+    """A credential that never enters a sandbox: a name Hermes manages (its own check, the one its env
+    passthrough registry applies: provider and tool API keys, GITHUB_TOKEN/GH_TOKEN, adapter secrets,
+    AUXILIARY_*_API_KEY ...), or an LLM proxy key Hermes does not classify (WITHHELD_ENV_PREFIXES). Hermes lets
+    an EXPLICIT forward (docker_forward_env) bypass its check; this plugin does not. Fails closed: a name that
+    cannot be classified is withheld, logged every time, and never marked as warned."""
+    if name.startswith(WITHHELD_ENV_PREFIXES):
+        reason = "is an LLM proxy key"
+    else:
+        try:
+            from tools.env_passthrough import _is_hermes_provider_credential
+            if not _is_hermes_provider_credential(name):
+                return False
+        except Exception as e:
+            log.warning("forwarded environment: cannot classify %s with Hermes's credential check (%s); "
+                        "withheld", name, type(e).__name__)
+            return True
+        reason = "is a credential Hermes manages"
+    if name not in _WITHHELD_WARNED:
+        _WITHHELD_WARNED.add(name)
+        log.warning("forwarded environment: %s %s; it is not forwarded into sandboxes", name, reason)
+    return True
 
 
 def _served(name: str) -> bool:
@@ -448,21 +458,14 @@ class KubernetesEnvironment(BaseEnvironment):
     def _exec_env_script(self) -> str:
         """The forwarded environment of ONE exec, as shell lines the runner evals (never in an argv, the exec
         URL or the Pod spec). Values come from Hermes's own resolver: `terminal.env_passthrough` plus the
-        `forward_env` setting (minus Hermes-managed credentials), the routed profile's value under
+        `forward_env` setting (minus withheld credentials, see _withheld), the routed profile's value under
         multiplexing; names the scope lacks come back to be unset, so another profile's value can never
         linger. Plus the git credential configuration. Only shell-name-valid names are emitted and every
         value is shell-quoted; a NUL in a value is refused by stdin_payload."""
-        forward = []
-        for name in self._s.forward_env:
-            if _hermes_credential(name):
-                if name not in _WITHHELD_WARNED:
-                    _WITHHELD_WARNED.add(name)
-                    log.warning("forward_env: %s is a credential Hermes manages; it is not forwarded into "
-                                "sandboxes", name)
-                continue
-            forward.append(name)
-        values, unset = resolve_passthrough_env(forward)
-        values = {k: v for k, v in values.items() if isinstance(k, str) and _SHELL_NAME.fullmatch(k)}
+        values, unset = resolve_passthrough_env([n for n in self._s.forward_env if not _withheld(n)])
+        # Every resolved name, implicit terminal.env_passthrough ones included, passes the same check.
+        values = {k: v for k, v in values.items()
+                  if isinstance(k, str) and _SHELL_NAME.fullmatch(k) and not _withheld(k)}
         values.update(git_config_env(self._s.git_credentials))
         unset = {n for n in unset if isinstance(n, str) and _SHELL_NAME.fullmatch(n) and n not in values}
         self._exec_env_names.update(values)

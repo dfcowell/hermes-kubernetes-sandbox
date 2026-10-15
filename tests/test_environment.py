@@ -1127,3 +1127,65 @@ def test_hermes_declared_secret_in_forward_env_is_not_forwarded(monkeypatch, sec
     assert "s3cr3t-declared" not in script and secret not in script
     assert "export HS_FWD_TEST=plain-value\n" in script
     assert secret in e._snapshot_excluded_passthrough_names()
+
+
+def test_litellm_keys_are_withheld_per_exec_even_when_implicit(_isolated_hermes_home, monkeypatch):
+    """R-H20 (b): Hermes v0.22.1 does not classify LITELLM_* keys, so the plugin withholds them itself, on every
+    name the resolver returns: here they arrive IMPLICITLY via the real terminal.env_passthrough (config.yaml),
+    never passing through forward_env, and directly via a forward_env that bypassed settings validation."""
+    (_isolated_hermes_home / "config.yaml").write_text(
+        "terminal:\n  env_passthrough: [LITELLM_API_KEY, HS_IMPLICIT]\n")
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-litellm-implicit")
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "sk-litellm-master")
+    monkeypatch.setenv("HS_IMPLICIT", "implicit-ok")
+    from tools.env_passthrough import get_all_passthrough
+    assert {"LITELLM_API_KEY", "HS_IMPLICIT"} <= get_all_passthrough()  # precondition: Hermes passes both
+    s = Settings(runtime_class_name="kata", docker_disk_storage_class="b", forward_env=("LITELLM_MASTER_KEY",))
+    e, _, _ = _env(settings=s)
+    script = e._exec_env_script()
+    assert "export HS_IMPLICIT=implicit-ok\n" in script
+    assert "sk-litellm" not in script and "LITELLM_API_KEY=" not in script and "LITELLM_MASTER_KEY=" not in script
+    assert {"LITELLM_API_KEY", "LITELLM_MASTER_KEY"} <= set(e._snapshot_excluded_passthrough_names())
+
+
+def test_real_predicate_forwards_an_unclassified_token():
+    """R-H20 I3 positive control against Hermes's REAL credential check: a homelab token name Hermes does not
+    manage IS forwarded. A Hermes bump that starts classifying *_TOKEN shapes fails here."""
+    import os
+    s = Settings(runtime_class_name="kata", docker_disk_storage_class="b", forward_env=("HOMELAB_FORGEJO_TOKEN",))
+    e, _, _ = _env(settings=s)
+    os.environ["HOMELAB_FORGEJO_TOKEN"] = "forge-tok"
+    try:
+        assert "export HOMELAB_FORGEJO_TOKEN=forge-tok\n" in e._exec_env_script()
+    finally:
+        del os.environ["HOMELAB_FORGEJO_TOKEN"]
+
+
+def _broken_predicate(monkeypatch, how):
+    import sys
+    import types
+    if how == "missing":
+        monkeypatch.setitem(sys.modules, "tools.env_passthrough", None)  # import raises ImportError
+    else:
+        mod = types.ModuleType("tools.env_passthrough")
+
+        def boom(name):
+            raise RuntimeError("registry unavailable")
+        mod._is_hermes_provider_credential = boom
+        mod.get_all_passthrough = lambda: frozenset()
+        monkeypatch.setitem(sys.modules, "tools.env_passthrough", mod)
+
+
+@pytest.mark.parametrize("how", ["missing", "raising"])
+def test_unclassifiable_names_are_withheld(monkeypatch, caplog, how):
+    """R-H20 I2: if Hermes's credential check cannot be imported or raises, NO forward_env name or value is
+    emitted (fail closed), with a distinct log line, and the name is not marked as warned (it is retried)."""
+    monkeypatch.setenv("HS_FWD_TEST", "v4lue-closed")
+    _broken_predicate(monkeypatch, how)
+    s = Settings(runtime_class_name="kata", docker_disk_storage_class="b", forward_env=("HS_FWD_TEST",))
+    e, _, _ = _env(settings=s)
+    with caplog.at_level("WARNING"):
+        script = e._exec_env_script()
+    assert "HS_FWD_TEST" not in script and "v4lue-closed" not in script
+    assert "cannot classify HS_FWD_TEST" in caplog.text and "v4lue-closed" not in caplog.text
+    assert "HS_FWD_TEST" not in envmod._WITHHELD_WARNED

@@ -203,15 +203,23 @@ for a nullable key means "unset".
 | `git_credentials` | `[]` | Forges that in-sandbox `git` authenticates to: a list of `{url, username, password_env}`. `url` is `https://` with no user part or `..` segments, and the host is compared case-insensitively. `password_env` must also be listed in `forward_env`. From the environment: JSON or YAML text. |
 
 `forward_env` and `password_env` refuse names that change how a shell, the dynamic loader or Python
-start, that belong to Kubernetes or Hermes, or that the sandbox's command runner cannot assign:
-`LD_*`, `BASH_ENV`, `ENV`, `PATH`, `IFS`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `PROMPT_COMMAND`,
-`PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `POSIXLY_CORRECT`, `KUBERNETES_*`, `HERMES_*`, bash's
-readonly and special variables (`UID`, `EUID`, `PPID`, `BASHPID`, `BASH_VERSINFO`, `GROUPS`,
-`BASH_ARGV0`, `BASH_SUBSHELL`) and the runner's own `__hs_*`. Secrets Hermes manages itself (LLM
-provider and tool API keys, `GITHUB_TOKEN`/`GH_TOKEN`, memory and messaging-adapter keys,
-`AUXILIARY_*_API_KEY` ...) are withheld at every command with Hermes's own credential check, even
-when listed in `forward_env` (Hermes's docker backend lets an explicit `docker_forward_env` bypass
-that check; this plugin does not), with one warning per name. Name a forge token something else
+start, that belong to Kubernetes or Hermes, that the sandbox's command runner cannot assign, or that
+are LLM proxy keys: `LD_*`, `BASH_ENV`, `ENV`, `PATH`, `IFS`, `SHELLOPTS`, `BASHOPTS`, `PS4`,
+`PROMPT_COMMAND`, `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `POSIXLY_CORRECT`, `KUBERNETES_*`,
+`HERMES_*`, bash's readonly and special variables (`UID`, `EUID`, `PPID`, `BASHPID`, `BASH_VERSINFO`,
+`GROUPS`, `BASH_ARGV0`, `BASH_SUBSHELL`), the runner's own `__hs_*`, and `LITELLM_*`.
+
+Credentials are also withheld at every command, from every forwarded name, including names that
+arrive through Hermes's `terminal.env_passthrough` rather than `forward_env`:
+
+- secrets Hermes manages itself, by Hermes's own credential check: LLM provider and tool API keys,
+  `GITHUB_TOKEN`/`GH_TOKEN`, memory and messaging-adapter keys, `AUXILIARY_*_API_KEY` ... (Hermes's
+  docker backend lets an explicit `docker_forward_env` bypass that check; this plugin does not);
+- `LITELLM_*` (e.g. `LITELLM_API_KEY`, `LITELLM_MASTER_KEY`): LiteLLM proxy keys, which Hermes
+  does not classify.
+
+Each withheld name is logged once. If Hermes's check cannot be loaded or fails, every name it would
+judge is withheld (and logged each time). Name a forge token something Hermes does not manage
 (e.g. `FORGE_TOKEN`).
 
 ### Forwarded environment and git credentials
