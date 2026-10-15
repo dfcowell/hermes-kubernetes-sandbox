@@ -103,8 +103,10 @@ _HASH_CLAIM = "<workspace-claim>"
 
 
 def template_hash(s: Settings) -> str:
-    return hashlib.sha256(json.dumps({"spec": _spec(s, _HASH_CLAIM), "annotations": s.extra_pod_annotations},
-                                     sort_keys=True).encode()).hexdigest()[:8]
+    payload = {"spec": _spec(s, _HASH_CLAIM), "annotations": s.extra_pod_annotations}
+    if s.extra_pod_labels:  # only when set: an upgrade must not change every existing Pod's hash
+        payload["labels"] = s.extra_pod_labels
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:8]
 
 
 def identity_labels(ident: Identity) -> dict:
@@ -112,7 +114,7 @@ def identity_labels(ident: Identity) -> dict:
 
 
 def render_pod(s: Settings, ident: Identity, *, now_iso: str, created_by: str) -> dict:
-    labels = {**identity_labels(ident), LBL_COMPONENT: "sandbox", LBL_TEMPLATE_HASH: template_hash(s)}
+    labels = {**s.extra_pod_labels, **identity_labels(ident), LBL_COMPONENT: "sandbox", LBL_TEMPLATE_HASH: template_hash(s)}
     annotations = {**s.extra_pod_annotations, ANN_SESSION_KEY: ident.session_key, ANN_LAST_USED: now_iso,
                    ANN_MAX_LIFETIME: str(s.max_lifetime_seconds), ANN_CREATED_BY: created_by}
     return {"apiVersion": "v1", "kind": "Pod",
