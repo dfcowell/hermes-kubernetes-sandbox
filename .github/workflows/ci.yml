@@ -18,6 +18,10 @@ jobs:
         run: .venv/bin/ruff check .
       - name: Test
         run: .venv/bin/pytest -v
+      - name: Test the PyYAML fallback (older Hermes; v0.22+ ships no PyYAML, so these skip above)
+        run: |
+          uv pip install --python .venv pyyaml==6.0.3
+          .venv/bin/pytest -v -k pyyaml
   examples:
     runs-on: ubuntu-24.04
     steps:

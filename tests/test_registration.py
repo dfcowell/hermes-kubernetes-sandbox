@@ -1,11 +1,8 @@
 import importlib.util
-import pathlib
-import subprocess
 import sys
 
 import pytest
-
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+from isolated import LOADERS, ROOT, run_isolated
 
 
 class FakeCtx:
@@ -20,7 +17,6 @@ def _load_plugin_root():
     spec = importlib.util.spec_from_file_location(
         "kubernetes_sandbox_plugin", ROOT / "__init__.py", submodule_search_locations=[str(ROOT)])
     mod = importlib.util.module_from_spec(spec)
-    import sys
     sys.modules["kubernetes_sandbox_plugin"] = mod
     spec.loader.exec_module(mod)
     return mod
@@ -41,15 +37,9 @@ def test_register_adds_one_kubernetes_provider():
     assert ctx.providers[0].name == "kubernetes"
 
 
-# Run in a fresh interpreter: blocking a module only means something before anything imported it.
-_WITHOUT = r"""
+
+_REGISTER = r"""
 import pathlib, sys, tempfile, types
-for name in sys.argv[2:]:
-    sys.modules[name] = None  # import raises ImportError, as when the package is not installed
-if "hermes_yaml" in sys.argv[2:]:  # stand-in for PyYAML (not installed here): the same two names
-    from ruamel.yaml import YAML
-    from ruamel.yaml.error import YAMLError
-    sys.modules["yaml"] = types.SimpleNamespace(safe_load=YAML(typ="safe").load, YAMLError=YAMLError)
 import importlib.util
 spec = importlib.util.spec_from_file_location(
     "kubernetes_sandbox_plugin", pathlib.Path(sys.argv[1], "__init__.py"), submodule_search_locations=[sys.argv[1]])
@@ -76,11 +66,26 @@ print("ok")
 """
 
 
-@pytest.mark.parametrize("blocked", [
-    ["yaml"],  # Hermes >= v0.22 ships no PyYAML: the plugin reads YAML through Hermes's own loader
-    ["hermes_yaml"],  # older Hermes, and the examples tooling outside Hermes: PyYAML
-], ids=lambda b: "without-" + "-".join(b))
-def test_plugin_registers_and_reads_settings_without(blocked):
-    r = subprocess.run([sys.executable, "-c", _WITHOUT, str(ROOT), *blocked],
-                       capture_output=True, text=True, timeout=120)
+@pytest.mark.parametrize("block", LOADERS)
+def test_plugin_registers_and_reads_settings_with_only(block):
+    """Hermes v0.22+ ships no PyYAML (hermes_yaml); older Hermes ships no hermes_yaml (PyYAML)."""
+    r = run_isolated(_REGISTER, block=block)
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr[-3000:]
+
+
+def test_broken_hermes_yaml_fails_with_its_own_cause_and_no_fallback(tmp_path):
+    """A hermes_yaml that is installed but cannot import must not silently switch to PyYAML (other
+    semantics), nor be reported as a missing PyYAML."""
+    (tmp_path / "hermes_yaml.py").write_text("raise ImportError('hermes_yaml sentinel: ruamel.yaml is broken')\n")
+    (tmp_path / "yaml.py").write_text("raise AssertionError('fell back to PyYAML')\n")
+    r = run_isolated("import kubernetes_sandbox.settings\n", path=[tmp_path])
+    assert r.returncode != 0
+    assert "ImportError: hermes_yaml sentinel: ruamel.yaml is broken" in r.stderr, r.stderr[-3000:]
+    assert "fell back to PyYAML" not in r.stderr
+
+
+def test_no_yaml_loader_names_both():
+    r = run_isolated("import kubernetes_sandbox.settings\n", block=["hermes_yaml", "yaml"])
+    assert r.returncode != 0
+    assert "neither is installed" in r.stderr and "hermes_yaml" in r.stderr and "PyYAML" in r.stderr, \
+        r.stderr[-3000:]

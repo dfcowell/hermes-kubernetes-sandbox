@@ -1,4 +1,5 @@
 import pytest
+from isolated import LOADERS, run_isolated
 from kubernetes_sandbox.settings import Settings, SettingsError, interlock_error, load_settings
 
 
@@ -166,3 +167,29 @@ def test_workspace_access_mode_default_yaml_env_and_invalid(_isolated_hermes_hom
         monkeypatch.setenv("HERMES_K8S_WORKSPACE_ACCESS_MODE", bad)
         with pytest.raises(SettingsError, match="workspace_access_mode"):
             load_settings(_isolated_hermes_home)
+
+
+_DUPLICATES = r"""
+import pathlib, sys, tempfile
+from kubernetes_sandbox.settings import SettingsError, load_settings
+for text in ["docker: false\nnamespace: a\nnamespace: b\n",
+             "docker: false\nextra_pod_annotations: {team: a, team: b}\n"]:
+    with tempfile.TemporaryDirectory() as home:
+        pathlib.Path(home, "kubernetes-sandbox.yaml").write_text(text)
+        try:
+            load_settings(pathlib.Path(home))
+        except SettingsError as e:
+            print(" ".join(str(e).split()))
+        else:
+            print("ACCEPTED")
+"""
+
+
+@pytest.mark.parametrize("block", LOADERS)
+def test_duplicate_keys_are_a_settings_error_with_either_loader(block):
+    """A repeated key is almost always an edit gone wrong; neither loader may silently keep the last value."""
+    r = run_isolated(_DUPLICATES, block=block)
+    assert r.returncode == 0, r.stderr[-3000:]
+    top, nested = r.stdout.splitlines()
+    assert "not valid YAML" in top and "duplicate key" in top and "namespace" in top, top
+    assert "not valid YAML" in nested and "duplicate key" in nested and "team" in nested, nested

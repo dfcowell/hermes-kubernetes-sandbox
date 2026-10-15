@@ -31,8 +31,10 @@ server but has not been live-tested.
 
 ## Install
 
-The plugin uses only libraries Hermes already ships (httpx, websockets, and its YAML loader:
-`hermes_yaml` from v0.22, PyYAML before).
+The plugin uses only libraries Hermes already ships (httpx, websockets, and a YAML loader).
+Tested against Hermes v0.22.1 (pinned in CI). On Hermes v0.22+ the plugin parses settings with
+Hermes's internal `hermes_yaml` module (not a stable plugin API; a rename is caught by the
+registration test at the next pin bump); on older Hermes, PyYAML.
 
 ```sh
 git clone https://github.com/dfcowell/hermes-kubernetes-sandbox "$HERMES_HOME/plugins/kubernetes-sandbox"
@@ -166,7 +168,7 @@ force-detaches it (about 6 minutes); see Known limits.
 
 Read from `$HERMES_HOME/kubernetes-sandbox.yaml` (optional); every key can be set or overridden by
 the environment variable `HERMES_K8S_<KEY in upper case>`, e.g. `HERMES_K8S_MAX_PER_PROFILE=3`.
-Unknown keys are an error. Booleans accept `1/0`, `true/false`, `yes/no`, `on/off`; an empty value
+Unknown keys and duplicate keys are an error. Booleans accept `1/0`, `true/false`, `yes/no`, `on/off`; an empty value
 for a nullable key means "unset".
 
 | Key | Default | Meaning |
@@ -223,9 +225,9 @@ kept.
 rather than a dependency on the official `kubernetes` package or another client library:
 
 - **No new dependencies.** A Hermes plugin is installed as a directory, with no dependency
-  installation step. The plugin uses only `httpx`, `websockets` and Hermes's YAML loader
-  (ruamel.yaml via `hermes_yaml` from v0.22, PyYAML before), which Hermes already ships as pinned
-  core dependencies. A client library would have to become a Hermes core dependency, or be
+  installation step. The plugin uses only `httpx`, `websockets` and a YAML loader, which Hermes
+  already ships as pinned core dependencies (YAML: Hermes's internal `hermes_yaml` module on
+  v0.22+, not a stable plugin API; PyYAML on older Hermes — see Install). A client library would have to become a Hermes core dependency, or be
   fetched from PyPI at runtime, unpinned, on a security-sensitive path.
 - **The API surface is small.** Get, list, create, patch and delete for Pods and PVCs (PVC
   deletes carry uid/resourceVersion preconditions), plus exec. The token file is re-read on every request, so a

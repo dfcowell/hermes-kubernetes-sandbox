@@ -2,14 +2,45 @@
 from __future__ import annotations
 
 import dataclasses
+import importlib.util
 import os
 import pathlib
 import re
 
-try:  # Hermes >= v0.22 ships no PyYAML: read YAML the way Hermes does (ruamel.yaml, YAML 1.1 booleans)
+# Tested against Hermes v0.22.1 (pinned in CI). On Hermes v0.22+ settings are parsed with Hermes's
+# internal `hermes_yaml` module (ruamel.yaml; not a stable plugin API -- a rename is caught by the
+# registration test at the next pin bump); on older Hermes, and in the examples tooling that renders
+# Pods outside Hermes, with PyYAML. The choice is by availability, never by import failure: a
+# hermes_yaml that is present but broken must fail with its own cause, not switch parsers.
+# Both loaders reject duplicate keys.
+if importlib.util.find_spec("hermes_yaml") is not None:
     from hermes_yaml import YAMLError, safe_load
-except ImportError:  # older Hermes, and the examples tooling that renders Pods outside Hermes
-    from yaml import YAMLError, safe_load
+elif importlib.util.find_spec("yaml") is not None:
+    import yaml
+
+    YAMLError = yaml.YAMLError
+
+    class _UniqueKeySafeLoader(yaml.SafeLoader):
+        def construct_mapping(self, node, deep=False):
+            seen = set()
+            for key_node, _ in node.value:
+                key = self.construct_object(key_node, deep=True)
+                try:
+                    duplicate = key in seen
+                except TypeError:  # unhashable key: the base constructor rejects it with its own error
+                    break
+                if duplicate:
+                    raise yaml.constructor.ConstructorError(
+                        "while constructing a mapping", node.start_mark,
+                        f"found duplicate key {key!r}", key_node.start_mark)
+                seen.add(key)
+            return super().construct_mapping(node, deep)
+
+    def safe_load(text: str):
+        return yaml.load(text, Loader=_UniqueKeySafeLoader)
+else:
+    raise ImportError("kubernetes-sandbox needs a YAML loader: Hermes's hermes_yaml module (Hermes v0.22+) "
+                      "or PyYAML (older Hermes); neither is installed")
 
 
 def _default_work_image() -> str:
