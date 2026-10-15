@@ -263,3 +263,59 @@ def test_git_credentials_url_once(_isolated_hermes_home):
         _load(_isolated_hermes_home,
               "git_credentials:\n  - {url: https://f.example.com, username: a, password_env: T}\n"
               "  - {url: \"https://f.example.com/\", username: b, password_env: U}\n")
+
+
+@pytest.mark.parametrize("text,why", [
+    ('forward_env: ["A\\n"]\n', "forward_env"),
+    ('extra_pod_labels: {"x\\n": a}\n', "not a valid label key"),
+    ('extra_pod_labels: {"example.com\\n/x": a}\n', "not a valid label key"),
+    ('extra_pod_labels: {x: "a\\n"}\n', "not a valid label value"),
+    ('git_credentials: [{url: "https://h\\n", username: u, password_env: T}]\n', "https://"),
+    ('git_credentials: [{url: "https://h", username: "u\\n", password_env: T}]\n', "username"),
+    ('git_credentials: [{url: "https://h", username: u, password_env: "T\\n"}]\n', "password_env"),
+])
+def test_trailing_newline_rejected(_isolated_hermes_home, text, why):
+    with pytest.raises(SettingsError, match=why):
+        _load(_isolated_hermes_home, text)
+
+
+@pytest.mark.parametrize("name", ["LD_PRELOAD", "LD_LIBRARY_PATH", "BASH_ENV", "ENV", "PATH", "IFS", "SHELLOPTS",
+                                  "BASHOPTS", "PS4", "PROMPT_COMMAND", "PYTHONPATH", "PYTHONSTARTUP",
+                                  "PYTHONHOME", "KUBERNETES_SERVICE_HOST", "HERMES_HOME", "HERMES_K8S_API_URL"])
+def test_denied_env_names(_isolated_hermes_home, name):
+    with pytest.raises(SettingsError, match=f"forward_env: {name} cannot be forwarded"):
+        _load(_isolated_hermes_home, f"forward_env: [{name}]\n")
+    with pytest.raises(SettingsError, match=rf"git_credentials\[0\].password_env: {name} cannot be forwarded"):
+        _load(_isolated_hermes_home, f"git_credentials: [{{url: https://h, username: u, password_env: {name}}}]\n")
+
+
+def test_git_credential_password_env_must_be_forwarded(_isolated_hermes_home):
+    with pytest.raises(SettingsError, match="password_env FORGE_TOKEN .* forward_env"):
+        _load(_isolated_hermes_home, "forward_env: [OTHER]\n"
+              "git_credentials: [{url: https://h, username: u, password_env: FORGE_TOKEN}]\n")
+
+
+def test_label_key_prefix_dns_label_max_63(_isolated_hermes_home):
+    assert _load(_isolated_hermes_home, f"extra_pod_labels: {{{'a' * 63}.example.com/x: v}}\n").extra_pod_labels
+    with pytest.raises(SettingsError, match="not a valid label key"):
+        _load(_isolated_hermes_home, f"extra_pod_labels: {{{'a' * 64}.example.com/x: v}}\n")
+
+
+def test_git_credentials_host_case_insensitive(_isolated_hermes_home):
+    s = _load(_isolated_hermes_home, "forward_env: [T]\n"
+              "git_credentials: [{url: https://Forge.Example.COM/Org, username: u, password_env: T}]\n")
+    assert s.git_credentials == (GitCredential("https://forge.example.com/Org", "u", "T"),)
+    with pytest.raises(SettingsError, match="each url may appear once"):
+        _load(_isolated_hermes_home,
+              "git_credentials:\n  - {url: https://h.example.com, username: a, password_env: T}\n"
+              "  - {url: \"https://H.example.com/\", username: b, password_env: U}\n")
+
+
+@pytest.mark.parametrize("url", ["https://h/..", "https://h/a/../b", "https://h/../"])
+def test_git_credentials_dotdot_rejected(_isolated_hermes_home, url):
+    with pytest.raises(SettingsError, match=r"'\.\.' segments"):
+        _load(_isolated_hermes_home, f"git_credentials: [{{url: \"{url}\", username: u, password_env: T}}]\n")
+
+
+def test_forward_env_bare_scalar(_isolated_hermes_home):
+    assert _load(_isolated_hermes_home, "forward_env: FOO\n").forward_env == ("FOO",)

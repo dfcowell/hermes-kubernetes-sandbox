@@ -198,6 +198,16 @@ for a nullable key means "unset".
 | `token_path` | `/var/run/secrets/kubernetes.io/serviceaccount/token` | Bearer token file (re-read per request). |
 | `ca_path` | `/var/run/secrets/kubernetes.io/serviceaccount/ca.crt` | CA bundle; empty = system trust. A configured path that does not exist fails `check_requirements`. |
 | `extra_pod_annotations` | `{}` | Extra Pod annotations, string to string. From the environment: JSON or YAML text. |
+| `extra_pod_labels` | `{}` | Extra Pod labels, string to string (e.g. to select sandboxes in a NetworkPolicy). Keys and values must be valid Kubernetes labels; `hermes-sandbox/*`, `app.kubernetes.io/managed-by` and `app.kubernetes.io/component` belong to the plugin. From the environment: JSON or YAML text. |
+| `forward_env` | `[]` | Names of gateway environment variables to forward into sandboxes. From the environment: a JSON/YAML list, or names separated by commas or spaces. See below for what can't be forwarded. |
+| `git_credentials` | `[]` | Forges that in-sandbox `git` authenticates to: a list of `{url, username, password_env}`. `url` is `https://` with no user part or `..` segments, and the host is compared case-insensitively. `password_env` must also be listed in `forward_env`. From the environment: JSON or YAML text. |
+
+`forward_env` and `password_env` refuse names that change how a shell, the dynamic loader or Python
+start, or that belong to Kubernetes or Hermes: `LD_*`, `BASH_ENV`, `ENV`, `PATH`, `IFS`, `SHELLOPTS`,
+`BASHOPTS`, `PS4`, `PROMPT_COMMAND`, `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `KUBERNETES_*` and
+`HERMES_*`. The plugin cannot know every secret name (for example LLM provider or memory API keys),
+so it does not try to block them. Hermes does: its environment passthrough withholds every variable
+Hermes declares as a secret, even when it is listed here.
 
 Changing a setting that affects the Pod template replaces existing sandbox Pods on their next
 command (template-hash label), with the `environment_recreated` notice; the workspace volume is

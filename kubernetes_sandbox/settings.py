@@ -102,17 +102,35 @@ _FIELDS = {f.name: f for f in dataclasses.fields(Settings)}
 # Settings whose YAML key (and HERMES_K8S_<KEY> variable) differs from the field name.
 _KEY_TO_FIELD = {"workspace_retention": "workspace_retention_seconds"}
 _KEYS = {**{k: k for k in _FIELDS if k not in _KEY_TO_FIELD.values()}, **_KEY_TO_FIELD}
-_DURATION = re.compile(r"^(\d+)([smhd]?)$")
+_DURATION = re.compile(r"(\d+)([smhd]?)")
 _UNIT = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
-_SHELL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_LABEL_NAME = re.compile(r"^[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$")
-_DNS_SUBDOMAIN = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$")
+# Validators are applied with fullmatch: `$` would also accept a trailing newline.
+_SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_LABEL_NAME = re.compile(r"[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?")
+_DNS_LABEL = re.compile(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?")
 _PLUGIN_LABELS = ("app.kubernetes.io/managed-by", "app.kubernetes.io/component")
 _PLUGIN_LABEL_PREFIX = "hermes-sandbox/"
-_GIT_URL = re.compile(r"^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$")
-_GIT_USER = re.compile(r"^[A-Za-z0-9._@+-]{1,128}$")
+_GIT_URL = re.compile(r"https://([A-Za-z0-9.-]+)(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?")
+_GIT_USER = re.compile(r"[A-Za-z0-9._@+-]{1,128}")
+# Variables a sandbox must never receive from the gateway: they change how the shell, the dynamic
+# loader or Python start (BASH_ENV, LD_PRELOAD, PYTHONSTARTUP, ...) or point the sandbox at the
+# gateway's cluster or Hermes itself. Secrets Hermes knows about (provider API keys and the like) are
+# withheld by Hermes's own passthrough scrub, not by this list.
+_DENIED_ENV = frozenset({"BASH_ENV", "ENV", "PATH", "IFS", "SHELLOPTS", "BASHOPTS", "PS4", "PROMPT_COMMAND",
+                         "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME"})
+_DENIED_ENV_PREFIXES = ("LD_", "KUBERNETES_", "HERMES_")
+
+
+def _env_name(where: str, name) -> str:
+    if not isinstance(name, str) or not _SHELL_NAME.fullmatch(name):
+        raise SettingsError(f"{where} must be an environment variable name ([A-Za-z_][A-Za-z0-9_]*), "
+                            f"got {name!r}")
+    if name in _DENIED_ENV or name.startswith(_DENIED_ENV_PREFIXES):
+        raise SettingsError(f"{where}: {name} cannot be forwarded into a sandbox (it changes how the "
+                            "shell, loader or Python start, or belongs to Kubernetes or Hermes)")
+    return name
 
 
 def _yaml_text(key: str, raw):
@@ -144,9 +162,10 @@ def _labels(raw) -> dict[str, str]:
                             "(quote numbers and booleans)")
     for k, v in raw.items():
         prefix, _, name = k.rpartition("/")
-        if (prefix and (len(prefix) > 253 or not _DNS_SUBDOMAIN.match(prefix))) or not _LABEL_NAME.match(name):
+        bad_prefix = prefix and (len(prefix) > 253 or not all(_DNS_LABEL.fullmatch(p) for p in prefix.split(".")))
+        if bad_prefix or not _LABEL_NAME.fullmatch(name):
             raise SettingsError(f"extra_pod_labels: {k!r} is not a valid label key")
-        if v and not _LABEL_NAME.match(v):
+        if v and not _LABEL_NAME.fullmatch(v):
             raise SettingsError(f"extra_pod_labels: value {v!r} of {k!r} is not a valid label value")
         if k in _PLUGIN_LABELS or k.startswith(_PLUGIN_LABEL_PREFIX):
             raise SettingsError(f"extra_pod_labels: {k!r} is set by the plugin itself and cannot be overridden")
@@ -159,9 +178,9 @@ def _forward_env(raw) -> tuple[str, ...]:
     raw = _yaml_text("forward_env", raw)
     if raw is None:
         return ()
-    if not isinstance(raw, list) or not all(isinstance(x, str) and _SHELL_NAME.match(x) for x in raw):
+    if not isinstance(raw, list):
         raise SettingsError("forward_env must be a list of environment variable names ([A-Za-z_][A-Za-z0-9_]*)")
-    return tuple(dict.fromkeys(raw))
+    return tuple(dict.fromkeys(_env_name("forward_env", x) for x in raw))
 
 
 def _git_credentials(raw) -> tuple[GitCredential, ...]:
@@ -175,13 +194,15 @@ def _git_credentials(raw) -> tuple[GitCredential, ...]:
         if not isinstance(item, dict) or set(item) != {"url", "username", "password_env"}:
             raise SettingsError(f"git_credentials[{i}] must have exactly the keys url, username, password_env")
         url, user, var = item["url"], item["username"], item["password_env"]
-        if not isinstance(url, str) or not _GIT_URL.match(url):
-            raise SettingsError(f"git_credentials[{i}].url must be an https:// URL with no user, quotes or "
-                                f"spaces, got {url!r}")
-        if not isinstance(user, str) or not _GIT_USER.match(user):
+        m = _GIT_URL.fullmatch(url) if isinstance(url, str) else None
+        if not m or ".." in (m.group(3) or "").split("/"):
+            raise SettingsError(f"git_credentials[{i}].url must be an https:// URL with no user, quotes, "
+                                f"spaces or '..' segments, got {url!r}")
+        if not isinstance(user, str) or not _GIT_USER.fullmatch(user):
             raise SettingsError(f"git_credentials[{i}].username {user!r} may contain only letters, digits and ._@+-")
-        if not isinstance(var, str) or not _SHELL_NAME.match(var):
-            raise SettingsError(f"git_credentials[{i}].password_env must be an environment variable name, got {var!r}")
+        _env_name(f"git_credentials[{i}].password_env", var)
+        # Host names are case-insensitive: store the host lower-cased so duplicates are caught.
+        url = f"https://{m.group(1).lower()}{m.group(2) or ''}{m.group(3) or ''}"
         out.append(GitCredential(url.rstrip("/"), user, var))
     if len({c.url for c in out}) != len(out):
         raise SettingsError("git_credentials: each url may appear once")
@@ -192,7 +213,7 @@ def _duration(key: str, raw) -> int:
     """Seconds, from an int or `<n>s|m|h|d` ("7d"); bare digits are seconds."""
     if isinstance(raw, int) and not isinstance(raw, bool):
         return raw
-    m = _DURATION.match(raw.strip()) if isinstance(raw, str) else None
+    m = _DURATION.fullmatch(raw.strip()) if isinstance(raw, str) else None
     if not m:
         raise SettingsError(f"{key} must be a whole number of seconds or a duration like 90s, 15m, 36h, 7d; "
                             f"got {raw!r}")
@@ -241,6 +262,10 @@ def validate(s: Settings) -> Settings:
             raise SettingsError(f"{name} must be positive")
     if s.workspace_retention_seconds <= 0:
         raise SettingsError("workspace_retention must be positive")
+    for c in s.git_credentials:
+        if c.password_env not in s.forward_env:
+            raise SettingsError(f"git_credentials: password_env {c.password_env} for {c.url} must also be "
+                                "listed in forward_env")
     return s
 
 
