@@ -989,3 +989,24 @@ def test_pvc_quota_hint_names_count_and_storage():
     with pytest.raises(EnvironmentConnectionError) as ei:
         e.ensure_pod()
     assert "PVC count" in ei.value.retry_hint and "storage" in ei.value.retry_hint
+
+
+def test_wait_for_process_forwards_every_base_keyword(monkeypatch):
+    """Hermes grows _wait_for_process parameters between releases (v0.22: `output`); the override must pass
+    them through instead of failing with TypeError."""
+    from tools.environments.base import BaseEnvironment
+    seen = {}
+
+    def fake_base(self, proc, timeout=120, **kwargs):
+        seen.update(kwargs, timeout=timeout)
+        return {"output": "", "returncode": 0}
+
+    monkeypatch.setattr(BaseEnvironment, "_wait_for_process", fake_base)
+    e, _, _ = _env()
+
+    class Proc:
+        error = None
+        _killed = None
+
+    assert e._wait_for_process(Proc(), 7, output="collector", bounded_capture=True)["returncode"] == 0
+    assert seen == {"timeout": 7, "output": "collector", "bounded_capture": True}

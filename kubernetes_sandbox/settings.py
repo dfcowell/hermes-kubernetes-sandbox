@@ -6,7 +6,10 @@ import os
 import pathlib
 import re
 
-import yaml
+try:  # Hermes >= v0.22 ships no PyYAML: read YAML the way Hermes does (ruamel.yaml, YAML 1.1 booleans)
+    from hermes_yaml import YAMLError, safe_load
+except ImportError:  # older Hermes, and the examples tooling that renders Pods outside Hermes
+    from yaml import YAMLError, safe_load
 
 
 def _default_work_image() -> str:
@@ -66,8 +69,8 @@ _FALSE = {"0", "false", "no", "off"}
 def _annotations(raw) -> dict[str, str]:
     if isinstance(raw, str):  # HERMES_K8S_EXTRA_POD_ANNOTATIONS: JSON or YAML text
         try:
-            raw = yaml.safe_load(raw)
-        except yaml.YAMLError as e:
+            raw = safe_load(raw)
+        except YAMLError as e:
             raise SettingsError(f"extra_pod_annotations is not valid JSON/YAML: {e}") from None
     if raw is None:
         return {}
@@ -132,8 +135,8 @@ def load_settings(home: pathlib.Path) -> Settings:
     path = pathlib.Path(home) / "kubernetes-sandbox.yaml"
     if path.exists():
         try:
-            data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except yaml.YAMLError as e:
+            data = safe_load(path.read_text(encoding="utf-8"))
+        except YAMLError as e:
             raise SettingsError(f"{path} is not valid YAML: {e}") from None
         if data is None:
             data = {}

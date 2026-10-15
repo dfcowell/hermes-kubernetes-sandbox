@@ -31,7 +31,8 @@ server but has not been live-tested.
 
 ## Install
 
-The plugin uses only libraries Hermes already ships (httpx, websockets, PyYAML).
+The plugin uses only libraries Hermes already ships (httpx, websockets, and its YAML loader:
+`hermes_yaml` from v0.22, PyYAML before).
 
 ```sh
 git clone https://github.com/dfcowell/hermes-kubernetes-sandbox "$HERMES_HOME/plugins/kubernetes-sandbox"
@@ -202,9 +203,9 @@ kept.
 
 ## Development and validation
 
-    uv venv -p 3.13 .venv
+    uv venv -p 3.14 .venv
     git clone --filter=blob:none https://github.com/NousResearch/hermes-agent.git .hermes-src
-    git -C .hermes-src checkout --quiet 524041b9d0437cd4424a524af4b9e26145e69ab0
+    git -C .hermes-src checkout --quiet 297552a9d646119871391d202509822cd86330df
     uv pip install --python .venv -e .hermes-src pytest==9.1.1 ruff==0.15.10
     .venv/bin/ruff check . && .venv/bin/pytest
 
@@ -222,9 +223,10 @@ kept.
 rather than a dependency on the official `kubernetes` package or another client library:
 
 - **No new dependencies.** A Hermes plugin is installed as a directory, with no dependency
-  installation step. The plugin uses only `httpx`, `websockets` and PyYAML, which Hermes already
-  ships as pinned core dependencies. A client library would have to become a Hermes core
-  dependency, or be fetched from PyPI at runtime, unpinned, on a security-sensitive path.
+  installation step. The plugin uses only `httpx`, `websockets` and Hermes's YAML loader
+  (ruamel.yaml via `hermes_yaml` from v0.22, PyYAML before), which Hermes already ships as pinned
+  core dependencies. A client library would have to become a Hermes core dependency, or be
+  fetched from PyPI at runtime, unpinned, on a security-sensitive path.
 - **The API surface is small.** Get, list, create, patch and delete for Pods and PVCs (PVC
   deletes carry uid/resourceVersion preconditions), plus exec. The token file is re-read on every request, so a
   rotating projected ServiceAccount token works without a refresh mechanism.

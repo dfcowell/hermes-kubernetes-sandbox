@@ -1,8 +1,8 @@
 """Minimal Kubernetes API client for sandbox Pods and workspace PVCs (httpx; no kubernetes package).
 
 Deliberately not a client library: Hermes plugins are installed as a directory with no dependency
-install step, and httpx/websockets/PyYAML are already pinned Hermes core dependencies, so this keeps
-the plugin dependency-free (a library would mean a new core dependency or an unpinned runtime PyPI
+install step, and httpx, websockets and a YAML loader are already pinned Hermes core dependencies, so
+this keeps the plugin dependency-free (a library would mean a new core dependency or an unpinned runtime PyPI
 fetch). The surface needed is small: Pod/PVC get/list/create/patch/delete (PVC deletes carry
 uid/resourceVersion preconditions), plus the exec URL (the exec stream itself is exec_stream.py). The token file is
 re-read on every request so a rotating projected ServiceAccount token just works. Trade-off: only

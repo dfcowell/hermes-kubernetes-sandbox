@@ -450,11 +450,10 @@ class KubernetesEnvironment(BaseEnvironment):
                 f"Sandbox Pod {self._id.pod_name} is gone",
                 retry_hint="Retry the command; the sandbox Pod is recreated automatically.") from None
 
-    def _wait_for_process(self, proc, timeout=120, *, bounded_capture=False, watch_interrupt_tid=None,
-                          yield_handler=None):
-        result = super()._wait_for_process(
-            proc, timeout, bounded_capture=bounded_capture, watch_interrupt_tid=watch_interrupt_tid,
-            yield_handler=yield_handler)
+    def _wait_for_process(self, proc, timeout=120, **kwargs):
+        # Every keyword goes through unchanged: the base grows parameters between Hermes releases
+        # (v0.22 added `output`), and this override only adds the stream-loss check below.
+        result = super()._wait_for_process(proc, timeout, **kwargs)
         err = getattr(proc, "error", None)
         killed = getattr(proc, "_killed", None)
         if isinstance(err, (ExecDisconnected, ExecFailed)) and not (killed is not None and killed.is_set()):
