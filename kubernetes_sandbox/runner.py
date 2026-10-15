@@ -7,8 +7,15 @@ over-consuming stdin.
 The env section (K11) is shell text (`export NAME='value'` / `unset NAME…`) built by the plugin. The
 runner evals it in ITS OWN shell, so the command inherits the values while no process argv
 (/proc/<pid>/cmdline, `ps`) carries them: the script itself is an argv of the command's bash.
-The eval fails closed: a section that does not evaluate cleanly (a builder bug) exits 125 and the
-command never runs with a partial environment.
+The eval fails closed: if ANY command of the section fails (a builder bug: a syntax error, a readonly
+name), the runner exits 125 and the command never runs with a partial environment. The eval's stderr is
+discarded, because bash echoes the offending line, value included, and Hermes returns stderr as output.
+The runner leaves POSIX mode (POSIXLY_CORRECT in the container's environment) for the eval, where a
+failing special builtin would exit the shell with its own status, and restores it for the command.
+
+The lengths are computed by stdin_payload. A stream shorter than they announce (the client went away
+mid-send with the connection held open) blocks in `read`/`head` until Hermes's own deadline kills
+the exec.
 
 The exec's stdin is NEVER closed. On Kata 3.28 / containerd 2.2.3 / Kubernetes 1.36.5 an exec
 whose stdin has been closed loses all output the process writes after the close (measured with
@@ -33,6 +40,9 @@ from __future__ import annotations
 PGID_DIR = "/tmp"
 
 RUNNER = r'''
+__hs_posix=${POSIXLY_CORRECT+1}
+__hs_posix_value=${POSIXLY_CORRECT-}
+set +o posix
 export LC_ALL=C
 IFS= read -r __hs_n || exit 125
 IFS= read -r __hs_in || exit 125
@@ -60,8 +70,13 @@ if [ "$__hs_in" -gt 0 ]; then
   __hs_src="$__hs_spool"
 fi
 [ -e "$__hs_tomb" ] && exit 137
-eval "$__hs_env" || exit 125
+__hs_ok=1
+trap '__hs_ok=0' ERR
+{ eval "$__hs_env"; } 2>/dev/null
+trap - ERR
 unset __hs_env
+[ "$__hs_ok" = 1 ] || { echo "hermes-runner: the forwarded environment did not evaluate" >&2; exit 125; }
+[ "$__hs_posix" = 1 ] && export POSIXLY_CORRECT="$__hs_posix_value"
 if [ "$__hs_login" = 1 ]; then __hs_bash=(bash -l -c); else __hs_bash=(bash -c); fi
 setsid --wait timeout --kill-after=10 "$((__hs_timeout + 5))" "${__hs_bash[@]}" '
   read -r _ _ _ _ __pg _ < /proc/$$/stat; echo "$__pg" > "$1"; [ -e "$2" ] && exit 137

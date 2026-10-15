@@ -211,14 +211,38 @@ def test_env_section_unsets_names_the_scope_lacks():
     assert p.stdout == b"unset\n"
 
 
-@pytest.mark.parametrize("env_script", ["export HS_TEST_A='unterminated\n", "export HS_TEST_A=ok; (\n",
-                                        "readonly HS_TEST_RO=1; unset HS_TEST_RO\n"])
-def test_malformed_env_section_fails_closed(tmp_path, env_script):
-    # A builder bug must not run the command with a partial environment (R-H18).
+MALFORMED_ENV = {
+    # every section carries the value V in a line bash may echo back on error; every failure but the
+    # unterminated quote is NOT the last command of the section
+    "unterminated-quote": "export HS_TEST_A='V\n",
+    "syntax-error-mid-section": "export HS_TEST_S='V'; )\nexport HS_TEST_A=1\n",
+    "readonly-unset-first": "unset UID\nexport HS_TEST_A='V'\n",
+    "readonly-export-first": "export EUID='V'\nexport HS_TEST_A=1\n",
+    "readonly-own-var-unset": "readonly HS_TEST_RO='V'; unset HS_TEST_RO\nexport HS_TEST_A=1\n",
+}
+
+
+@pytest.mark.parametrize("posix", [False, True], ids=["bash", "POSIXLY_CORRECT"])
+@pytest.mark.parametrize("name", list(MALFORMED_ENV))
+def test_malformed_env_section_fails_closed(tmp_path, name, posix):
+    # A builder bug must not run the command with a partial environment (R-H18), whichever line of the
+    # section fails, and bash's error message must not echo a forwarded value into the command output.
     marker = tmp_path / "ran"
-    p, exec_id = _run(f"touch {marker}", "IN", env_script=env_script)
-    assert p.returncode == 125 and not marker.exists()
+    value = "v4lue-" + uuid.uuid4().hex
+    env_script = MALFORMED_ENV[name].replace("V", value)
+    proc_env = {**os.environ, "POSIXLY_CORRECT": "1"} if posix else None
+    p, exec_id = _run(f"touch {marker}", "IN", env_script=env_script, proc_env=proc_env)
+    assert p.returncode == 125 and not marker.exists(), p.stderr
+    assert value.encode() not in p.stdout + p.stderr
+    assert b"forwarded environment did not evaluate" in p.stderr
     assert not list(pathlib.Path("/tmp").glob(f"hermes-exec-{exec_id}.*"))
+
+
+def test_posixly_correct_reaches_the_command_unchanged():
+    p, _ = _run('printf "%s|%s" "${POSIXLY_CORRECT-unset}" "$HS_TEST_A"', env_script="export HS_TEST_A=ok\n",
+                proc_env={**os.environ, "POSIXLY_CORRECT": "y"})
+    assert p.returncode == 0, p.stderr
+    assert p.stdout == b"y|ok"
 
 
 def test_bad_env_length_is_rejected():
