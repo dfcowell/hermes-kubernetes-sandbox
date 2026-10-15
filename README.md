@@ -125,6 +125,44 @@ The token file is re-read on every request, so renewing it needs no restart.
 The `work` image must provide GNU bash (the runner uses `read -N` and arrays), GNU coreutils
 (`head -c`, `wc`, `timeout`) and util-linux `setsid` (`--wait`). Hermes's default sandbox image does; busybox-only images do not.
 
+## Credentials in the sandbox
+
+Nothing is forwarded by default. A forwarded value (`forward_env` plus Hermes's
+`terminal.env_passthrough`) is resolved by Hermes for the routed profile on every command and
+travels in the exec's stdin, as `export NAME='quoted value'` lines; the runner evaluates them in
+its own shell before the command, so the command and its children inherit them while no process
+argument (`ps`, `/proc/<pid>/cmdline`), the Pod spec, the exec URL, the session snapshot or the
+workspace volume ever holds them. Only valid shell names are emitted, every value is shell-quoted
+(it arrives verbatim and never executes), and a NUL byte refuses the command. Forwarded and git
+names are excluded from Hermes's session snapshot (a file in the Pod's `/tmp` that every later
+command sources), whether or not profiles are multiplexed. Under a multiplexed gateway a name the
+routed profile does not have is `unset`, so a shared value cannot leak between profiles.
+Credentials Hermes manages and LLM proxy or memory keys are withheld at every command (see
+Settings).
+
+`git_credentials` configures `git` through `GIT_CONFIG_*` environment, so no credential file is
+written. For each entry, git gets command-scope configuration through `GIT_CONFIG_COUNT` /
+`GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` (git 2.31 or newer in the work image):
+`credential.<url>.helper` is first set to the empty string, which resets every helper inherited
+from the image's or the user's configuration (so no `store` helper writes the token), then to a
+shell helper that answers `get` with `printf '%s\n' 'username=<username>'` and `printf
+'password=%s\n' "$<password_env>"`. `printf`, not `echo`: the image's `/bin/sh` may be dash, whose
+`echo` interprets backslashes in the token. The helper text names the variable, never its value,
+and `GIT_TERMINAL_PROMPT=0` makes a missing token fail instead of prompting.
+
+**Threat model.** The plugin never *writes* a forwarded token anywhere: not into the Pod spec, the
+workspace PVC, git configuration files or the session snapshot. The agent, however, *can read* it
+(its own environment, `/proc/<pid>/environ`) and could persist it itself, for example with
+`git -c credential.helper=store`, `GIT_TRACE_REDACT=0`, or a plain `echo "$FORGE_TOKEN" > file`. So
+"the token is absent from disk" is a property of the plugin, not a guarantee about the agent: give a
+forwarded token the narrowest scope that works, and treat it as available to everything the agent
+runs. Dangerous-command approvals stay on (`skip_container_guards` is always false), whenever and
+however credentials are forwarded: a forwarded token makes a destructive command more
+consequential, not less.
+
+**Egress.** Reaching the forge usually also needs an egress rule: label the sandbox Pods with
+`extra_pod_labels` and select that label in an extra policy (`examples/kata/networkpolicy.yaml`).
+
 ## Operating: node drains and force-deletes
 
 Sandbox Pods are bare Pods with `emptyDir` volumes, so `kubectl drain` refuses them by default
@@ -198,16 +236,16 @@ for a nullable key means "unset".
 | `token_path` | `/var/run/secrets/kubernetes.io/serviceaccount/token` | Bearer token file (re-read per request). |
 | `ca_path` | `/var/run/secrets/kubernetes.io/serviceaccount/ca.crt` | CA bundle; empty = system trust. A configured path that does not exist fails `check_requirements`. |
 | `extra_pod_annotations` | `{}` | Extra Pod annotations, string to string. From the environment: JSON or YAML text. |
-| `extra_pod_labels` | `{}` | Extra Pod labels, string to string (e.g. to select sandboxes in a NetworkPolicy). Keys and values must be valid Kubernetes labels; `hermes-sandbox/*`, `app.kubernetes.io/managed-by` and `app.kubernetes.io/component` belong to the plugin. From the environment: JSON or YAML text. |
-| `forward_env` | `[]` | Names of gateway environment variables to forward into sandboxes. From the environment: a JSON/YAML list, or names separated by commas or spaces. See below for what can't be forwarded. |
-| `git_credentials` | `[]` | Forges that in-sandbox `git` authenticates to: a list of `{url, username, password_env}`. `url` is `https://` with no user part or `..` segments, and the host is compared case-insensitively. `password_env` must also be listed in `forward_env`. From the environment: JSON or YAML text. |
+| `extra_pod_labels` | `{}` | Extra Pod labels, string to string (e.g. the selector of an opt-in egress policy). Keys and values must be valid Kubernetes labels; the plugin's own label keys (`hermes-sandbox/*`, `app.kubernetes.io/managed-by`, `app.kubernetes.io/component`) are refused. In the template hash only when set. From the environment: JSON or YAML text. |
+| `forward_env` | `[]` | Variable names forwarded into every command, on top of Hermes's `terminal.env_passthrough` (both resolved per routed profile). List only what the sandbox needs; see below for what can't be forwarded. From the environment: a JSON/YAML list, or names separated by commas or spaces. |
+| `git_credentials` | `[]` | One `{url, username, password_env}` per forge: in-sandbox `git` authenticates to `url` as `username` with the value of `password_env`, which must also be listed in `forward_env`. `url` is `https://` with no user part or `..` segments, and the host is compared case-insensitively. From the environment: JSON or YAML text. See "Credentials in the sandbox". |
 
 `forward_env` and `password_env` refuse names that change how a shell, the dynamic loader or Python
 start, that belong to Kubernetes or Hermes, that the sandbox's command runner cannot assign, or that
-are LLM proxy keys: `LD_*`, `BASH_ENV`, `ENV`, `PATH`, `IFS`, `SHELLOPTS`, `BASHOPTS`, `PS4`,
+are LLM proxy or memory keys: `LD_*`, `BASH_ENV`, `ENV`, `PATH`, `IFS`, `SHELLOPTS`, `BASHOPTS`, `PS4`,
 `PROMPT_COMMAND`, `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `POSIXLY_CORRECT`, `KUBERNETES_*`,
 `HERMES_*`, bash's readonly and special variables (`UID`, `EUID`, `PPID`, `BASHPID`, `BASH_VERSINFO`,
-`GROUPS`, `BASH_ARGV0`, `BASH_SUBSHELL`), the runner's own `__hs_*`, and `LITELLM_*`.
+`GROUPS`, `BASH_ARGV0`, `BASH_SUBSHELL`), the runner's own `__hs_*`, `LITELLM_*` and `HINDSIGHT_*`.
 
 Credentials are also withheld at every command, from every forwarded name, including names that
 arrive through Hermes's `terminal.env_passthrough` rather than `forward_env`:
@@ -216,40 +254,13 @@ arrive through Hermes's `terminal.env_passthrough` rather than `forward_env`:
   `GITHUB_TOKEN`/`GH_TOKEN`, memory and messaging-adapter keys, `AUXILIARY_*_API_KEY` ... (Hermes's
   docker backend lets an explicit `docker_forward_env` bypass that check; this plugin does not);
 - `LITELLM_*` (e.g. `LITELLM_API_KEY`, `LITELLM_MASTER_KEY`): LiteLLM proxy keys, which Hermes
-  does not classify.
+  does not classify;
+- `HINDSIGHT_*` (e.g. `HINDSIGHT_API_TENANT_API_KEY`): keys of Hermes's Hindsight memory provider,
+  of which Hermes classifies only some.
 
 Each withheld name is logged once. If Hermes's check cannot be loaded or fails, every name it would
 judge is withheld (and logged each time). Name a forge token something Hermes does not manage
 (e.g. `FORGE_TOKEN`).
-
-### Forwarded environment and git credentials
-
-At every command the plugin resolves the forwarded names through Hermes (`terminal.env_passthrough`
-plus `forward_env`; under profile multiplexing, the routed profile's value, and a name that profile
-lacks is `unset` so another profile's value cannot linger). The values travel only in the command's
-exec stdin, as `export NAME='quoted value'` lines the runner evaluates before the command: never in
-the exec argv or URL, the Pod spec, or the workspace PVC. Only valid shell names are emitted, every
-value is shell-quoted (it arrives verbatim and never executes), and a NUL byte refuses the command.
-Forwarded and git names are excluded from Hermes's session snapshot (a file in the Pod's `/tmp`
-that every later command sources), whether or not profiles are multiplexed.
-
-For each `git_credentials` entry, git gets command-scope configuration through `GIT_CONFIG_COUNT` /
-`GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` (git 2.31 or newer in the work image):
-`credential.<url>.helper` is first set to the empty string, which drops every helper inherited from
-the image's or the user's configuration (so no `store` helper writes the token), then to a shell
-helper that answers `get` with `printf '%s\n' 'username=<username>'` and `printf 'password=%s\n'
-"$<password_env>"`. `printf`, not `echo`: the image's `/bin/sh` may be dash, whose `echo`
-interprets backslashes in the token. The helper text names the variable, never its value, and
-`GIT_TERMINAL_PROMPT=0` makes a missing token fail instead of prompting.
-
-**Threat model.** The plugin never *writes* a forwarded token anywhere: not into the Pod spec, the
-workspace PVC, git configuration files or the session snapshot. The agent, however, *can read* it
-(its own environment, `/proc/<pid>/environ`) and could persist it itself, for example with
-`git -c credential.helper=store`, `GIT_TRACE_REDACT=0`, or a plain `echo "$FORGE_TOKEN" > file`. So
-"the token is absent from disk" is a property of the plugin, not a guarantee about the agent: give a
-forwarded token the narrowest scope that works, and treat it as available to everything the agent
-runs. For the same reason Hermes's command approvals stay on for this backend
-(`skip_container_guards` is false) whenever, and however, credentials are forwarded.
 
 Changing a setting that affects the Pod template replaces existing sandbox Pods on their next
 command (template-hash label), with the `environment_recreated` notice; the workspace volume is

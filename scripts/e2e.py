@@ -15,7 +15,11 @@ every check passed. The Pod and the session's workspace PVC are always deleted a
 driver Role has no PVC delete, so with a driver token the PVC deletion is refused and the script
 prints the kubectl command to remove it (a WARN line, not a failed check).
 """
+import dataclasses
+import json
+import os
 import pathlib
+import re
 import secrets
 import shutil
 import sys
@@ -45,6 +49,9 @@ def main(argv: list[str]) -> int:
     with tempfile.TemporaryDirectory() as home:
         shutil.copy(src, pathlib.Path(home) / "kubernetes-sandbox.yaml")
         s = load_settings(pathlib.Path(home))
+    fwd = "HERMES_E2E_FORWARDED"
+    os.environ[fwd] = "e2e-" + secrets.token_hex(16)
+    s = dataclasses.replace(s, forward_env=tuple(dict.fromkeys((*s.forward_env, fwd))))
 
     env = KubernetesEnvironment(settings=s, identity=Identity("e2e", f"run-{int(time.time())}"),
                                 cwd="/workspace", timeout=120)
@@ -85,6 +92,22 @@ def main(argv: list[str]) -> int:
               f"returncode={r['returncode']}")
         r = env.execute("exit 9")
         check("exit code", r["returncode"] == 9, f"returncode={r['returncode']}")
+        val = os.environ[fwd]
+        r = env.execute(f'printf "%s\\n" "${fwd}"')
+        check("forwarded variable reaches the command", r["output"].strip().endswith(val))
+        r = env.execute('for f in /proc/[0-9]*/cmdline; do tr "\\0" " " < "$f" 2>/dev/null; echo; done '
+                        f'| grep -c -F -f <(printf "%s\\n" "${fwd}") || true; '
+                        f'grep -rlF -f <(printf "%s\\n" "${fwd}") /workspace /tmp 2>/dev/null | wc -l')
+        tail = r["output"].strip().splitlines()[-2:]
+        check("forwarded value in no process argv and no file under /workspace or /tmp", tail == ["0", "0"],
+              " ".join(tail))
+        check("forwarded value absent from the Pod object",
+              val not in json.dumps(env._client.get_pod(env._id.pod_name)))
+        # git_credentials configures git through GIT_CONFIG_* environment, which needs git >= 2.31.
+        r = env.execute("git --version")
+        m = re.search(r"git version (\d+)\.(\d+)", r["output"])
+        check("work image git >= 2.31 (GIT_CONFIG_* credentials)",
+              m is not None and (int(m[1]), int(m[2])) >= (2, 31), r["output"].strip()[-40:])
         if s.docker:
             r = env.execute("docker run --rm alpine:3.24.2 echo hello-from-inner", timeout=300)
             check("docker run", "hello-from-inner" in r["output"], r["output"].strip()[-100:])

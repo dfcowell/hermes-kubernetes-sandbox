@@ -22,3 +22,8 @@ dind_image: docker:29.8.1-dind@sha256:3f3c01aaaebf7cce837356b688b7c059a4749f10bd
 cli_image: docker:29.8.1-cli@sha256:018edbc908e08fcc9dbf029c812c34251e9b4719e6f71ca0e5eae2a987d014ca # bump deliberately
 formatter_image: debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 # bump deliberately
 # docker_cli: init-copy   # if your cluster lacks the ImageVolume feature (see README.md, Prerequisites)
+# Credentials (optional; see README "Credentials in the sandbox"). Values are never written anywhere.
+# forward_env: [FORGE_TOKEN]       # or list FORGE_TOKEN in the profile's terminal.env_passthrough
+# git_credentials:
+#   - {url: https://forge.example.com, username: my-bot, password_env: FORGE_TOKEN}
+# extra_pod_labels: {example.com/forge-egress: "true"}   # selected by the forge egress policy
