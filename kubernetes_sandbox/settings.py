@@ -56,6 +56,14 @@ class SettingsError(ValueError):
 
 
 @dataclasses.dataclass(frozen=True)
+class GitCredential:
+    """One forge for in-sandbox `git`: answered with `username` and the value of the forwarded `password_env`."""
+    url: str
+    username: str
+    password_env: str
+
+
+@dataclasses.dataclass(frozen=True)
 class Settings:
     namespace: str = "agent-sandbox"
     runtime_class_name: str | None = None
@@ -85,6 +93,9 @@ class Settings:
     token_path: str = "/var/run/secrets/kubernetes.io/serviceaccount/token"
     ca_path: str | None = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
     extra_pod_annotations: dict[str, str] = dataclasses.field(default_factory=dict)
+    extra_pod_labels: dict[str, str] = dataclasses.field(default_factory=dict)
+    forward_env: tuple[str, ...] = ()
+    git_credentials: tuple[GitCredential, ...] = ()
 
 
 _FIELDS = {f.name: f for f in dataclasses.fields(Settings)}
@@ -95,20 +106,86 @@ _DURATION = re.compile(r"^(\d+)([smhd]?)$")
 _UNIT = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
+_SHELL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_LABEL_NAME = re.compile(r"^[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$")
+_DNS_SUBDOMAIN = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$")
+_PLUGIN_LABELS = ("app.kubernetes.io/managed-by", "app.kubernetes.io/component")
+_PLUGIN_LABEL_PREFIX = "hermes-sandbox/"
+_GIT_URL = re.compile(r"^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$")
+_GIT_USER = re.compile(r"^[A-Za-z0-9._@+-]{1,128}$")
+
+
+def _yaml_text(key: str, raw):
+    """Environment overrides arrive as text: JSON or YAML."""
+    if not isinstance(raw, str):
+        return raw
+    try:
+        return safe_load(raw)
+    except YAMLError as e:
+        raise SettingsError(f"{key} is not valid JSON/YAML: {e}") from None
 
 
 def _annotations(raw) -> dict[str, str]:
-    if isinstance(raw, str):  # HERMES_K8S_EXTRA_POD_ANNOTATIONS: JSON or YAML text
-        try:
-            raw = safe_load(raw)
-        except YAMLError as e:
-            raise SettingsError(f"extra_pod_annotations is not valid JSON/YAML: {e}") from None
+    raw = _yaml_text("extra_pod_annotations", raw)
     if raw is None:
         return {}
     if not isinstance(raw, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in raw.items()):
         raise SettingsError("extra_pod_annotations must be a mapping of string keys to string values "
                             "(quote numbers and booleans)")
     return raw
+
+
+def _labels(raw) -> dict[str, str]:
+    raw = _yaml_text("extra_pod_labels", raw)
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in raw.items()):
+        raise SettingsError("extra_pod_labels must be a mapping of string keys to string values "
+                            "(quote numbers and booleans)")
+    for k, v in raw.items():
+        prefix, _, name = k.rpartition("/")
+        if (prefix and (len(prefix) > 253 or not _DNS_SUBDOMAIN.match(prefix))) or not _LABEL_NAME.match(name):
+            raise SettingsError(f"extra_pod_labels: {k!r} is not a valid label key")
+        if v and not _LABEL_NAME.match(v):
+            raise SettingsError(f"extra_pod_labels: value {v!r} of {k!r} is not a valid label value")
+        if k in _PLUGIN_LABELS or k.startswith(_PLUGIN_LABEL_PREFIX):
+            raise SettingsError(f"extra_pod_labels: {k!r} is set by the plugin itself and cannot be overridden")
+    return dict(raw)
+
+
+def _forward_env(raw) -> tuple[str, ...]:
+    if isinstance(raw, str) and not raw.strip().startswith("["):  # HERMES_K8S_FORWARD_ENV="A,B" or "A B"
+        raw = [x for x in re.split(r"[\s,]+", raw.strip()) if x]
+    raw = _yaml_text("forward_env", raw)
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(x, str) and _SHELL_NAME.match(x) for x in raw):
+        raise SettingsError("forward_env must be a list of environment variable names ([A-Za-z_][A-Za-z0-9_]*)")
+    return tuple(dict.fromkeys(raw))
+
+
+def _git_credentials(raw) -> tuple[GitCredential, ...]:
+    raw = _yaml_text("git_credentials", raw)
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise SettingsError("git_credentials must be a list of {url, username, password_env}")
+    out = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict) or set(item) != {"url", "username", "password_env"}:
+            raise SettingsError(f"git_credentials[{i}] must have exactly the keys url, username, password_env")
+        url, user, var = item["url"], item["username"], item["password_env"]
+        if not isinstance(url, str) or not _GIT_URL.match(url):
+            raise SettingsError(f"git_credentials[{i}].url must be an https:// URL with no user, quotes or "
+                                f"spaces, got {url!r}")
+        if not isinstance(user, str) or not _GIT_USER.match(user):
+            raise SettingsError(f"git_credentials[{i}].username {user!r} may contain only letters, digits and ._@+-")
+        if not isinstance(var, str) or not _SHELL_NAME.match(var):
+            raise SettingsError(f"git_credentials[{i}].password_env must be an environment variable name, got {var!r}")
+        out.append(GitCredential(url.rstrip("/"), user, var))
+    if len({c.url for c in out}) != len(out):
+        raise SettingsError("git_credentials: each url may appear once")
+    return tuple(out)
 
 
 def _duration(key: str, raw) -> int:
@@ -126,6 +203,12 @@ def _coerce(name: str, raw):
     ftype = _FIELDS[name].type
     if name == "extra_pod_annotations":
         return _annotations(raw)
+    if name == "extra_pod_labels":
+        return _labels(raw)
+    if name == "forward_env":
+        return _forward_env(raw)
+    if name == "git_credentials":
+        return _git_credentials(raw)
     if name == "workspace_retention_seconds":
         return _duration("workspace_retention", raw)
     if isinstance(raw, str):

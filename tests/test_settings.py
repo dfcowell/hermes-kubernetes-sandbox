@@ -1,6 +1,6 @@
 import pytest
 from isolated import LOADERS, run_isolated
-from kubernetes_sandbox.settings import Settings, SettingsError, interlock_error, load_settings
+from kubernetes_sandbox.settings import GitCredential, Settings, SettingsError, interlock_error, load_settings
 
 
 def test_defaults_without_file(_isolated_hermes_home, monkeypatch):
@@ -193,3 +193,73 @@ def test_duplicate_keys_are_a_settings_error_with_either_loader(block):
     top, nested = r.stdout.splitlines()
     assert "not valid YAML" in top and "duplicate key" in top and "namespace" in top, top
     assert "not valid YAML" in nested and "duplicate key" in nested and "team" in nested, nested
+
+
+def _load(home, text):
+    (home / "kubernetes-sandbox.yaml").write_text("docker: false\n" + text)
+    return load_settings(home)
+
+
+def test_credential_settings_default_empty(_isolated_hermes_home):
+    s = _load(_isolated_hermes_home, "")
+    assert s.forward_env == () and s.extra_pod_labels == {} and s.git_credentials == ()
+
+
+def test_credential_settings_from_yaml(_isolated_hermes_home):
+    s = _load(_isolated_hermes_home,
+              "forward_env: [FORGE_TOKEN, OTHER, FORGE_TOKEN]\n"
+              "extra_pod_labels: {example.com/forge-egress: \"true\"}\n"
+              "git_credentials:\n  - {url: \"https://forge.example.com/\", username: my-bot, password_env: FORGE_TOKEN}\n")
+    assert s.forward_env == ("FORGE_TOKEN", "OTHER")
+    assert s.extra_pod_labels == {"example.com/forge-egress": "true"}
+    assert s.git_credentials == (GitCredential("https://forge.example.com", "my-bot", "FORGE_TOKEN"),)
+
+
+def test_credential_settings_from_env(_isolated_hermes_home, monkeypatch):
+    monkeypatch.setenv("HERMES_K8S_FORWARD_ENV", "A, B C")
+    monkeypatch.setenv("HERMES_K8S_EXTRA_POD_LABELS", '{"example.com/x": "y"}')
+    monkeypatch.setenv("HERMES_K8S_GIT_CREDENTIALS",
+                       '[{"url": "https://f.example.com", "username": "u", "password_env": "A"}]')
+    s = _load(_isolated_hermes_home, "")
+    assert s.forward_env == ("A", "B", "C")
+    assert s.extra_pod_labels == {"example.com/x": "y"}
+    assert s.git_credentials == (GitCredential("https://f.example.com", "u", "A"),)
+
+
+@pytest.mark.parametrize("names", ["[1BAD]", "[A-B]", "[\"A B\"]", "{A: 1}"])
+def test_forward_env_rejects_non_names(_isolated_hermes_home, names):
+    with pytest.raises(SettingsError, match="forward_env"):
+        _load(_isolated_hermes_home, f"forward_env: {names}\n")
+
+
+@pytest.mark.parametrize("labels,why", [
+    ("{hermes-sandbox/profile: x}", "set by the plugin"),
+    ("{app.kubernetes.io/managed-by: x}", "set by the plugin"),
+    ("{app.kubernetes.io/component: x}", "set by the plugin"),
+    ("{\"bad key!\": x}", "not a valid label key"),
+    ("{example.com/ok: \"" + "v" * 64 + "\"}", "not a valid label value"),
+    ("{example.com/ok: 1}", "string keys to string values"),
+])
+def test_extra_pod_labels_rejected(_isolated_hermes_home, labels, why):
+    with pytest.raises(SettingsError, match=why):
+        _load(_isolated_hermes_home, f"extra_pod_labels: {labels}\n")
+
+
+@pytest.mark.parametrize("item,why", [
+    ("{url: https://f.example.com, username: u}", "exactly the keys"),
+    ("{url: http://f.example.com, username: u, password_env: T}", "https://"),
+    ("{url: \"https://u@f.example.com\", username: u, password_env: T}", "https://"),
+    ("{url: \"https://f.example.com/a b\", username: u, password_env: T}", "https://"),
+    ("{url: https://f.example.com, username: \"u'x\", password_env: T}", "username"),
+    ("{url: https://f.example.com, username: u, password_env: \"T X\"}", "password_env"),
+])
+def test_git_credentials_rejected(_isolated_hermes_home, item, why):
+    with pytest.raises(SettingsError, match=why):
+        _load(_isolated_hermes_home, f"git_credentials: [{item}]\n")
+
+
+def test_git_credentials_url_once(_isolated_hermes_home):
+    with pytest.raises(SettingsError, match="each url may appear once"):
+        _load(_isolated_hermes_home,
+              "git_credentials:\n  - {url: https://f.example.com, username: a, password_env: T}\n"
+              "  - {url: \"https://f.example.com/\", username: b, password_env: U}\n")
