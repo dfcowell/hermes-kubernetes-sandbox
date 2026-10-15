@@ -64,8 +64,9 @@ spec:
 # It is a connectivity requirement, not a policy bypass.
 # ---------------------------------------------------------------------------
 # Opt-in forge egress (pairs with `extra_pod_labels: {example.com/forge-egress: "true"}`): sandboxes
-# carrying the label may also reach the forge at 203.0.113.10:443 (replace with yours). A forge on an
-# RFC1918 address is otherwise blocked by sandbox-egress above.
+# carrying the label may also reach a forge on a private address, here 10.0.0.10:443 (replace with
+# yours). sandbox-egress above blocks RFC1918, so a LAN or in-cluster forge needs this policy; a forge
+# on a public address is already reachable on 443 and needs nothing extra.
 #
 # apiVersion: networking.k8s.io/v1
 # kind: NetworkPolicy
@@ -79,6 +80,6 @@ spec:
 #   policyTypes: [Egress]
 #   egress:
 #     - to:
-#         - ipBlock: {cidr: 203.0.113.10/32}
+#         - ipBlock: {cidr: 10.0.0.10/32}
 #       ports:
 #         - {port: 443, protocol: TCP}

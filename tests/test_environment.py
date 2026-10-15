@@ -1169,16 +1169,16 @@ def test_hindsight_keys_are_withheld_per_exec_even_when_implicit(_isolated_herme
 
 
 def test_real_predicate_forwards_an_unclassified_token():
-    """R-H20 I3 positive control against Hermes's REAL credential check: a homelab token name Hermes does not
+    """R-H20 I3 positive control against Hermes's REAL credential check: a forge token name Hermes does not
     manage IS forwarded. A Hermes bump that starts classifying *_TOKEN shapes fails here."""
     import os
-    s = Settings(runtime_class_name="kata", docker_disk_storage_class="b", forward_env=("HOMELAB_FORGEJO_TOKEN",))
+    s = Settings(runtime_class_name="kata", docker_disk_storage_class="b", forward_env=("ACME_FORGE_TOKEN",))
     e, _, _ = _env(settings=s)
-    os.environ["HOMELAB_FORGEJO_TOKEN"] = "forge-tok"
+    os.environ["ACME_FORGE_TOKEN"] = "forge-tok"
     try:
-        assert "export HOMELAB_FORGEJO_TOKEN=forge-tok\n" in e._exec_env_script()
+        assert "export ACME_FORGE_TOKEN=forge-tok\n" in e._exec_env_script()
     finally:
-        del os.environ["HOMELAB_FORGEJO_TOKEN"]
+        del os.environ["ACME_FORGE_TOKEN"]
 
 
 def _broken_predicate(monkeypatch, how):

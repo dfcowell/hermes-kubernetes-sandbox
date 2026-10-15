@@ -11,11 +11,13 @@ Which namespace/runtime is exercised (Kata ``agent-sandbox``, runc ``agent-sandb
 is decided entirely by the settings file.
 
 Prints only PASS/FAIL lines with short details (never the token or exec payloads). Exit 0 iff
-every check passed. The Pod and the session's workspace PVC are always deleted at the end; the
-driver Role has no PVC delete, so with a driver token the PVC deletion is refused and the script
-prints the kubectl command to remove it (a WARN line, not a failed check).
+every check passed. The probe variable E2E_FORWARDED_TOKEN is forwarded through the documented
+HERMES_K8S_FORWARD_ENV override (the file's own forward_env plus the probe), so it passes the same
+validation as an operator's setting. The Pod and the session's workspace PVC are always deleted at
+the end: with a driver Role that has PVC delete the script deletes the PVC itself ("deleted
+workspace PVC ..."); without it the deletion is refused and the script prints the kubectl command
+to remove it (a WARN line, not a failed check).
 """
-import dataclasses
 import json
 import os
 import pathlib
@@ -44,14 +46,29 @@ def main(argv: list[str]) -> int:
     from kubernetes_sandbox.environment import KubernetesEnvironment
     from kubernetes_sandbox.kube import NotFound
     from kubernetes_sandbox.naming import Identity
-    from kubernetes_sandbox.settings import load_settings
+    from kubernetes_sandbox.settings import SettingsError, load_settings
 
+    # The forwarded-value probe goes through the real settings path, exactly as an operator would configure
+    # it: the documented HERMES_K8S_FORWARD_ENV override, carrying the file's own forward_env plus the probe.
+    fwd = "E2E_FORWARDED_TOKEN"
+    os.environ[fwd] = "e2e-" + secrets.token_hex(16)
     with tempfile.TemporaryDirectory() as home:
         shutil.copy(src, pathlib.Path(home) / "kubernetes-sandbox.yaml")
         s = load_settings(pathlib.Path(home))
-    fwd = "HERMES_E2E_FORWARDED"
-    os.environ[fwd] = "e2e-" + secrets.token_hex(16)
-    s = dataclasses.replace(s, forward_env=tuple(dict.fromkeys((*s.forward_env, fwd))))
+        prev = os.environ.get("HERMES_K8S_FORWARD_ENV")
+        os.environ["HERMES_K8S_FORWARD_ENV"] = ",".join(dict.fromkeys((*s.forward_env, fwd)))
+        s = load_settings(pathlib.Path(home))
+        # Negative control: a denylisted credential name is refused by the same path.
+        os.environ["HERMES_K8S_FORWARD_ENV"] = ",".join(dict.fromkeys((*s.forward_env, "LITELLM_API_KEY")))
+        try:
+            load_settings(pathlib.Path(home))
+            denied = "accepted"
+        except SettingsError as e:
+            denied = "refused" if "LITELLM_API_KEY cannot be forwarded" in str(e) else f"other error: {e}"
+        if prev is None:
+            del os.environ["HERMES_K8S_FORWARD_ENV"]
+        else:
+            os.environ["HERMES_K8S_FORWARD_ENV"] = prev
 
     env = KubernetesEnvironment(settings=s, identity=Identity("e2e", f"run-{int(time.time())}"),
                                 cwd="/workspace", timeout=120)
@@ -69,6 +86,8 @@ def main(argv: list[str]) -> int:
         check(f"{which} Pod gone after a graceful delete", gone, "" if gone else "still terminating")
 
     try:
+        check(f"forward_env {fwd} accepted by load_settings", fwd in s.forward_env)
+        check("forward_env LITELLM_API_KEY refused by load_settings", denied == "refused", denied)
         t0 = time.time()
         r = env.execute("echo ready")  # first execute creates the Pod and builds the snapshot
         check("pod ready + session snapshot + first command",

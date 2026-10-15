@@ -145,10 +145,12 @@ written. For each entry, git gets command-scope configuration through `GIT_CONFI
 `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` (git 2.31 or newer in the work image):
 `credential.<url>.helper` is first set to the empty string, which resets every helper inherited
 from the image's or the user's configuration (so no `store` helper writes the token), then to a
-shell helper that answers `get` with `printf '%s\n' 'username=<username>'` and `printf
-'password=%s\n' "$<password_env>"`. `printf`, not `echo`: the image's `/bin/sh` may be dash, whose
-`echo` interprets backslashes in the token. The helper text names the variable, never its value,
-and `GIT_TERMINAL_PROMPT=0` makes a missing token fail instead of prompting.
+shell helper that exits 0 without output for every action other than `get` (`store`, `erase`), and
+answers `get` with `printf '%s\n' 'username=<username>'` and `printf 'password=%s\n'
+"${<password_env>:?<password_env> is not forwarded into this sandbox}"`. `printf`, not `echo`: the
+image's `/bin/sh` may be dash, whose `echo` interprets backslashes in the token. The helper text
+names the variable, never its value; an unset or empty variable fails the helper with that message,
+and `GIT_TERMINAL_PROMPT=0` makes the failure final instead of prompting.
 
 **Threat model.** The plugin never *writes* a forwarded token anywhere: not into the Pod spec, the
 workspace PVC, git configuration files or the session snapshot. The agent, however, *can read* it
