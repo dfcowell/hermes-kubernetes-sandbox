@@ -7,6 +7,8 @@ over-consuming stdin.
 The env section (K11) is shell text (`export NAME='value'` / `unset NAME…`) built by the plugin. The
 runner evals it in ITS OWN shell, so the command inherits the values while no process argv
 (/proc/<pid>/cmdline, `ps`) carries them: the script itself is an argv of the command's bash.
+The eval fails closed: a section that does not evaluate cleanly (a builder bug) exits 125 and the
+command never runs with a partial environment.
 
 The exec's stdin is NEVER closed. On Kata 3.28 / containerd 2.2.3 / Kubernetes 1.36.5 an exec
 whose stdin has been closed loses all output the process writes after the close (measured with
@@ -58,7 +60,7 @@ if [ "$__hs_in" -gt 0 ]; then
   __hs_src="$__hs_spool"
 fi
 [ -e "$__hs_tomb" ] && exit 137
-eval "$__hs_env"
+eval "$__hs_env" || exit 125
 unset __hs_env
 if [ "$__hs_login" = 1 ]; then __hs_bash=(bash -l -c); else __hs_bash=(bash -c); fi
 setsid --wait timeout --kill-after=10 "$((__hs_timeout + 5))" "${__hs_bash[@]}" '

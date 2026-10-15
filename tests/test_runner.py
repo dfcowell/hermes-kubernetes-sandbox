@@ -211,6 +211,16 @@ def test_env_section_unsets_names_the_scope_lacks():
     assert p.stdout == b"unset\n"
 
 
+@pytest.mark.parametrize("env_script", ["export HS_TEST_A='unterminated\n", "export HS_TEST_A=ok; (\n",
+                                        "readonly HS_TEST_RO=1; unset HS_TEST_RO\n"])
+def test_malformed_env_section_fails_closed(tmp_path, env_script):
+    # A builder bug must not run the command with a partial environment (R-H18).
+    marker = tmp_path / "ran"
+    p, exec_id = _run(f"touch {marker}", "IN", env_script=env_script)
+    assert p.returncode == 125 and not marker.exists()
+    assert not list(pathlib.Path("/tmp").glob(f"hermes-exec-{exec_id}.*"))
+
+
 def test_bad_env_length_is_rejected():
     p, _ = _run("", payload=b"4\n0\nx\ntrue")
     assert p.returncode == 125
