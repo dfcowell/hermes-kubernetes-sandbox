@@ -1207,5 +1207,28 @@ def test_unclassifiable_names_are_withheld(monkeypatch, caplog, how):
     with caplog.at_level("WARNING"):
         script = e._exec_env_script()
     assert "HS_FWD_TEST" not in script and "v4lue-closed" not in script
-    assert "cannot classify HS_FWD_TEST" in caplog.text and "v4lue-closed" not in caplog.text
+    assert caplog.text.count("cannot classify HS_FWD_TEST") == 1  # one warning per name per exec
+    assert "v4lue-closed" not in caplog.text
     assert "HS_FWD_TEST" not in envmod._WITHHELD_WARNED
+
+
+def test_explicit_withheld_name_is_resolved_but_never_emitted(monkeypatch, caplog):
+    """Operator review: one withheld check, AFTER resolution, covers explicit forward_env names (here a
+    Hermes-classified name that bypassed load-time validation) and implicit ones alike. The REAL Hermes resolver
+    sees and resolves the name; its value never reaches the env section."""
+    import kubernetes_sandbox.environment as em
+    real = em.resolve_passthrough_env
+    seen = {}
+
+    def spy(fwd):
+        seen["fwd"], seen["out"] = list(fwd), real(fwd)
+        return seen["out"]
+    monkeypatch.setattr(em, "resolve_passthrough_env", spy)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-resolved-not-sent")
+    s = Settings(runtime_class_name="kata", docker_disk_storage_class="b", forward_env=("OPENAI_API_KEY",))
+    e, _, _ = _env(settings=s)
+    with caplog.at_level("WARNING"):
+        script = e._exec_env_script()
+    assert seen["fwd"] == ["OPENAI_API_KEY"] and seen["out"][0] == {"OPENAI_API_KEY": "sk-resolved-not-sent"}
+    assert "sk-resolved-not-sent" not in script and "OPENAI_API_KEY" not in script
+    assert "sk-resolved-not-sent" not in caplog.text

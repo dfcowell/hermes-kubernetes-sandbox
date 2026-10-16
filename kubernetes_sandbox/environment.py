@@ -458,12 +458,13 @@ class KubernetesEnvironment(BaseEnvironment):
     def _exec_env_script(self) -> str:
         """The forwarded environment of ONE exec, as shell lines the runner evals (never in an argv, the exec
         URL or the Pod spec). Values come from Hermes's own resolver: `terminal.env_passthrough` plus the
-        `forward_env` setting (minus withheld credentials, see _withheld), the routed profile's value under
-        multiplexing; names the scope lacks come back to be unset, so another profile's value can never
-        linger. Plus the git credential configuration. Only shell-name-valid names are emitted and every
-        value is shell-quoted; a NUL in a value is refused by stdin_payload."""
-        values, unset = resolve_passthrough_env([n for n in self._s.forward_env if not _withheld(n)])
-        # Every resolved name, implicit terminal.env_passthrough ones included, passes the same check.
+        `forward_env` setting, the routed profile's value under multiplexing; names the scope lacks come back
+        to be unset, so another profile's value can never linger. Every RESOLVED name, explicit forward_env
+        and implicit terminal.env_passthrough alike, then passes one withheld-credential check (_withheld):
+        a withheld name is resolved but never emitted. Plus the git credential configuration. Only
+        shell-name-valid names are emitted and every value is shell-quoted; a NUL in a value is refused by
+        stdin_payload."""
+        values, unset = resolve_passthrough_env(self._s.forward_env)
         values = {k: v for k, v in values.items()
                   if isinstance(k, str) and _SHELL_NAME.fullmatch(k) and not _withheld(k)}
         values.update(git_config_env(self._s.git_credentials))

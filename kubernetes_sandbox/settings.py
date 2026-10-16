@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import dataclasses
+import ipaddress
 import importlib.util
 import os
 import pathlib
 import re
+import urllib.parse
 
 # Tested against Hermes v0.22.1 (pinned in CI). On Hermes v0.22+ settings are parsed with Hermes's
 # internal `hermes_yaml` module (ruamel.yaml; not a stable plugin API -- a rename is caught by the
@@ -112,7 +114,8 @@ _LABEL_NAME = re.compile(r"[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?")
 _DNS_LABEL = re.compile(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?")
 _PLUGIN_LABELS = ("app.kubernetes.io/managed-by", "app.kubernetes.io/component")
 _PLUGIN_LABEL_PREFIX = "hermes-sandbox/"
-_GIT_URL = re.compile(r"https://([A-Za-z0-9.-]+)(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?")
+# Characters a git_credentials url may never contain: it lands in a git config key and an env value.
+_GIT_URL_BAD_CHAR = re.compile(r"[\s\"'\\\x00-\x1f\x7f]")
 _GIT_USER = re.compile(r"[A-Za-z0-9._@+-]{1,128}")
 # Variables a sandbox must never receive from the gateway: they change how the shell, the dynamic
 # loader or Python start (BASH_ENV, LD_PRELOAD, PYTHONSTARTUP, ...) or point the sandbox at the
@@ -193,6 +196,33 @@ def _forward_env(raw) -> tuple[str, ...]:
     return tuple(dict.fromkeys(_env_name("forward_env", x) for x in raw))
 
 
+def _git_url(url) -> str | None:
+    """`https://<host>[:port]<path>` without a trailing slash, the host lower-cased (host names are
+    case-insensitive, so duplicates are caught) and an IPv6 literal bracketed; None if not acceptable. Parsed
+    with the standard library's urlsplit (no external dependency), then every part is checked explicitly."""
+    if not isinstance(url, str) or _GIT_URL_BAD_CHAR.search(url) or not url.isascii():
+        return None
+    try:
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port  # ValueError: not a number, or outside 0-65535
+    except ValueError:
+        return None
+    if (parts.scheme != "https" or not url.startswith("https://") or "@" in parts.netloc
+            or "?" in url or "#" in url or parts.netloc.endswith(":") or port == 0):
+        return None
+    host = parts.hostname or ""
+    if parts.netloc.startswith("["):
+        try:
+            host = f"[{ipaddress.IPv6Address(host).compressed}]"
+        except ValueError:
+            return None
+    elif not all(_DNS_LABEL.fullmatch(label) for label in host.removesuffix(".").split(".")):
+        return None
+    if any(urllib.parse.unquote(seg) == ".." for seg in parts.path.split("/")):
+        return None
+    return f"https://{host}{f':{port}' if port is not None else ''}{parts.path}".rstrip("/")
+
+
 def _git_credentials(raw) -> tuple[GitCredential, ...]:
     raw = _yaml_text("git_credentials", raw)
     if raw is None:
@@ -204,16 +234,14 @@ def _git_credentials(raw) -> tuple[GitCredential, ...]:
         if not isinstance(item, dict) or set(item) != {"url", "username", "password_env"}:
             raise SettingsError(f"git_credentials[{i}] must have exactly the keys url, username, password_env")
         url, user, var = item["url"], item["username"], item["password_env"]
-        m = _GIT_URL.fullmatch(url) if isinstance(url, str) else None
-        if not m or ".." in (m.group(3) or "").split("/"):
-            raise SettingsError(f"git_credentials[{i}].url must be an https:// URL with no user, quotes, "
-                                f"spaces or '..' segments, got {url!r}")
+        norm = _git_url(url)
+        if norm is None:
+            raise SettingsError(f"git_credentials[{i}].url must be an https:// URL with a host, optional port and "
+                                f"path, and no user, query, fragment, quotes, spaces or '..' segments, got {url!r}")
         if not isinstance(user, str) or not _GIT_USER.fullmatch(user):
             raise SettingsError(f"git_credentials[{i}].username {user!r} may contain only letters, digits and ._@+-")
         _env_name(f"git_credentials[{i}].password_env", var)
-        # Host names are case-insensitive: store the host lower-cased so duplicates are caught.
-        url = f"https://{m.group(1).lower()}{m.group(2) or ''}{m.group(3) or ''}"
-        out.append(GitCredential(url.rstrip("/"), user, var))
+        out.append(GitCredential(norm, user, var))
     if len({c.url for c in out}) != len(out):
         raise SettingsError("git_credentials: each url may appear once")
     return tuple(out)

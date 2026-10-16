@@ -1,3 +1,4 @@
+import json
 import pytest
 from isolated import LOADERS, run_isolated
 from kubernetes_sandbox.settings import GitCredential, Settings, SettingsError, interlock_error, load_settings
@@ -324,6 +325,40 @@ def test_git_credentials_host_case_insensitive(_isolated_hermes_home):
 def test_git_credentials_dotdot_rejected(_isolated_hermes_home, url):
     with pytest.raises(SettingsError, match=r"'\.\.' segments"):
         _load(_isolated_hermes_home, f"git_credentials: [{{url: \"{url}\", username: u, password_env: T}}]\n")
+
+
+def _git_url(home, url):
+    quoted = json.dumps(url).replace("\x7f", "\\x7f")  # a YAML double-quoted scalar; YAML forbids a raw DEL
+    return _load(home, "forward_env: [T]\n"
+                 f"git_credentials: [{{url: {quoted}, username: u, password_env: T}}]\n").git_credentials[0].url
+
+
+@pytest.mark.parametrize("url,normalised", [
+    ("https://[2001:DB8::1]:3000/org/", "https://[2001:db8::1]:3000/org"),  # IPv6 literal, bracketed
+    ("https://[::1]", "https://[::1]"),
+    ("https://Forge.Example.com:443/x", "https://forge.example.com:443/x"),  # explicit :443 kept
+    ("https://h.example.com/org%20x/r%C3%A9po", "https://h.example.com/org%20x/r%C3%A9po"),  # percent-encoding kept
+    ("https://h.example.com./org", "https://h.example.com./org"),  # trailing-dot (absolute) host kept
+    ("https://h.example.com:65535", "https://h.example.com:65535"),
+])
+def test_git_credentials_url_normalised(_isolated_hermes_home, url, normalised):
+    assert _git_url(_isolated_hermes_home, url) == normalised
+
+
+@pytest.mark.parametrize("url", [
+    "https://u:p@h.example.com", "https://@h.example.com", "https://u@[::1]/x",  # userinfo
+    "https://h.example.com/x?a=1", "https://h.example.com/?", "https://h.example.com/x#f", "https://h#",  # query/fragment
+    "https://h.example.com:99999", "https://h.example.com:0", "https://h.example.com:x", "https://h.example.com:",
+    "https://h.example.com:-1", "https://[::1]:abc",  # bad port
+    "https://", "https:///x", "https://h_x.example.com", "https://h..example.com", "https://[zz::1]",  # bad host
+    "https://h.example.com/a\tb", "https://h.example.com/a\"b", "https://h.example.com/a'b",
+    "https://h.example.com/a\\b", "https://h.example.com/\x7f", "https://h.example.com/a\u00a0b",  # chars
+    "HTTPS://h.example.com", "git://h.example.com", "https:h.example.com",  # scheme
+    "https://h.example.com/%2e%2e/x",  # encoded '..'
+])
+def test_git_credentials_url_rejected(_isolated_hermes_home, url):
+    with pytest.raises(SettingsError, match=r"git_credentials\[0\]\.url"):
+        _git_url(_isolated_hermes_home, url)
 
 
 def test_forward_env_bare_scalar(_isolated_hermes_home):
