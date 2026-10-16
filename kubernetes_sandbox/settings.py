@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import dataclasses
-import ipaddress
 import importlib.util
+import ipaddress
 import os
 import pathlib
 import re
