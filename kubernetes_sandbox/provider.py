@@ -26,19 +26,30 @@ def _profile(home: pathlib.Path) -> str:
         return "default"
 
 
-def _configured_cwd() -> str:
-    """The profile's TERMINAL_CWD (terminal.cwd), "" when unset. Reads Hermes's profile-scoped terminal policy."""
+_CWD_WARNED: set[str] = set()  # profiles already warned about their terminal.cwd
+
+
+def _configured_cwd() -> str | None:
+    """The profile's TERMINAL_CWD (terminal.cwd), "" when unset, None under a refusal scope (policy unreadable).
+
+    Reads Hermes's profile-scoped terminal policy; only an import failure (an older Hermes without
+    terminal_scope) falls back to the process env, as Hermes's own reader does."""
     try:
-        from tools.terminal_scope import terminal_env
-        return (terminal_env("TERMINAL_CWD", "") or "").strip()
-    except Exception:  # an older Hermes without terminal_scope, or a refusal scope: the process env
+        from tools.terminal_scope import TerminalPolicyUnavailable, terminal_env
+    except ImportError:
         import os
         return (os.environ.get("TERMINAL_CWD") or "").strip()
+    try:
+        return (terminal_env("TERMINAL_CWD", "") or "").strip()
+    except TerminalPolicyUnavailable:
+        return None
 
 
 def cwd_warning() -> str | None:
     """Why the configured terminal.cwd is a poor fit for this backend, or None when it is fine."""
     cwd = _configured_cwd()
+    if cwd is None:
+        return None
     if not cwd:
         return (f"terminal.cwd is unset: Hermes then runs commands in {HERMES_DEFAULT_CWD}, which the sandbox "
                 f"user cannot enter (the plugin maps it to {WORKSPACE}); set terminal.cwd: {WORKSPACE}")
@@ -106,7 +117,10 @@ class KubernetesProvider(TerminalEnvironmentProvider):
             return False
         cw = cwd_warning()
         if cw:
-            log.warning("kubernetes sandbox: %s", cw)  # a warning, not a failure: commands still run
+            profile = _profile(_home())
+            if profile not in _CWD_WARNED:  # once per profile: the check runs about once per turn
+                _CWD_WARNED.add(profile)
+                log.warning("kubernetes sandbox: %s", cw)  # a warning, not a failure: commands still run
         return True
 
     def probe(self):

@@ -117,6 +117,26 @@ def test_terminal_cwd_warning(_isolated_hermes_home, tmp_path, monkeypatch, capl
         assert row[0][0] is True
 
 
+def test_cwd_warning_is_logged_once_per_profile(_isolated_hermes_home, tmp_path, monkeypatch, caplog):
+    _ready_settings(_isolated_hermes_home, tmp_path)
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+    p = KubernetesProvider()
+    for _ in range(3):
+        assert p.check_requirements({}) is True
+    assert caplog.text.count("terminal.cwd is unset") == 1
+    assert "terminal.cwd is unset" in p.doctor_checks()[-1][2]  # the doctor row is not deduplicated
+
+
+def test_cwd_warning_is_silent_under_a_refusal_scope(monkeypatch):
+    from tools import terminal_scope
+    from kubernetes_sandbox.provider import cwd_warning
+    token = terminal_scope.set_terminal_scope(terminal_scope.TerminalPolicyRefusal("unreadable"))
+    try:
+        assert cwd_warning() is None
+    finally:
+        terminal_scope.reset_terminal_scope(token)
+
+
 def test_cwd_warning_reads_the_profile_scope_not_the_process_env(monkeypatch):
     """Multiplexed: the routed profile's terminal policy decides, not the gateway process's environment."""
     from tools.terminal_scope import reset_terminal_scope, set_terminal_scope

@@ -55,7 +55,9 @@ def test_hermes_still_drops_probe_only_for_plugins():
 def test_probe_gets_a_stub_without_settings_or_cluster(no_real_sandbox, kwargs):
     env = KubernetesProvider().create_environment(cwd="/root", timeout=180, image="", container_config={}, **kwargs)
     assert isinstance(env, ProbeEnvironment)
-    assert env.execute("printf 'os=%s' \"$(uname -s)\"", timeout=4) == {"output": PROBE_OUTPUT, "returncode": 0}
+    from agent.prompt_builder import _BACKEND_PROBE_CMD
+    assert env.execute(_BACKEND_PROBE_CMD, timeout=4) == {"output": PROBE_OUTPUT, "returncode": 0}
+    assert env.execute("echo hi", timeout=4) == {"output": "", "returncode": 1}  # not the probe: no fake success
     assert env.cleanup() is None
 
 
@@ -132,3 +134,4 @@ def test_terminal_tool_without_terminal_cwd_runs_in_the_workspace(registered, lo
     finally:
         from tools.terminal_tool_lifecycle import cleanup_vm
         cleanup_vm(task)
+        tt.clear_session_cwd("default")

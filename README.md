@@ -49,7 +49,9 @@ hermes config set terminal.cwd /workspace
 cannot enter. The plugin maps that literal `/root` to the environment's starting directory
 (`/workspace`), so commands still work, but a `terminal.cwd` keeps Hermes's own cwd planning, the
 session's recorded cwd and the system prompt pointing at the persistent workspace. `hermes doctor`
-and the backend's requirements check warn when `terminal.cwd` is unset or outside `/workspace`. An
+reports a hard FAIL row when `terminal.cwd` is unset or outside `/workspace` (its API has no warning
+tier, although commands still work); the backend's requirements check only logs a warning, once per
+profile. An
 explicit `workdir` on a command is honoured as given (`/root/...` subdirectories included).
 
 Then set up the cluster side from one of the examples:
@@ -75,7 +77,10 @@ to the session's own and a workspace volume left for the janitor. The plugin ans
 a Pod-less stub instead (`kubernetes_sandbox/probe.py`): it reports `os=Linux` and an unknown
 kernel, so the prompt says `OS: Linux`, and touches nothing in the cluster. Hermes v0.22.1 passes
 `probe_only=True` for the probe but drops it before it reaches a plugin provider, so the literal
-task_id is the signal; the stub also honours `probe_only` for when Hermes forwards it.
+task_id is the signal; the stub also honours `probe_only` for when Hermes forwards it. The test
+`test_hermes_still_drops_probe_only_for_plugins` fails on purpose when Hermes starts forwarding
+`probe_only`: that is a beneficial change, so make `probe_only` the primary signal (the task_id
+check can stay as the fallback) and update the test.
 **A Hermes bump must re-check that literal against `agent/prompt_builder.py`**:
 `tests/test_hermes_paths.py` pins it against the Hermes under test and fails if it changes.
 

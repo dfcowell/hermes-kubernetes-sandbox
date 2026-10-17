@@ -23,18 +23,22 @@ PROBE_OUTPUT = "os=Linux\nkernel=unknown"
 
 
 def is_backend_probe(task_id, kwargs) -> bool:
-    """True for Hermes's prompt-time backend probe (its literal task_id, or ``probe_only`` once Hermes forwards it)."""
+    """True for Hermes's prompt-time backend probe: its literal task_id, or ``probe_only`` once forwarded."""
     return task_id == PROBE_TASK_ID or bool(kwargs.get("probe_only"))
 
 
 class ProbeEnvironment:
-    """Duck-typed environment for the probe: every command "succeeds" with the static OS line; no Pod, no PVC."""
+    """Duck-typed environment for the probe: the probe's uname command gets the static OS line; no Pod, no PVC."""
 
     def __init__(self, *, cwd: str, timeout: int):
         self.cwd, self.timeout = cwd, timeout
 
     def execute(self, command: str, cwd: str = "", **kwargs) -> dict:
-        return {"output": PROBE_OUTPUT, "returncode": 0}
+        # Hermes's _BACKEND_PROBE_CMD is a printf of `uname -s` and `uname -r`. Anything else is not the probe
+        # (a future Hermes reusing this env): fail it rather than fake a success.
+        if "uname -s" in command and "uname -r" in command:
+            return {"output": PROBE_OUTPUT, "returncode": 0}
+        return {"output": "", "returncode": 1}
 
     def cleanup(self) -> None:
         return None

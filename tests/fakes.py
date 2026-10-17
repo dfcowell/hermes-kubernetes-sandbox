@@ -136,8 +136,8 @@ class FakeExec:
 class LocalExec:
     """exec_connect replacement that RUNS the runner on this machine (bash), speaking the exec channel protocol:
     the stdin frames are collected, the runner is started with them on its stdin (closed afterwards: the runner
-    delimits its stdin in-band, so only Kata cares, see exec_stream.py), and its stdout/stderr and exit status come back as channel 1/2/3 frames. The
-    "Pod" is this host, so paths in commands must exist here."""
+    delimits its stdin in-band, so only Kata cares, see exec_stream.py), and its stdout/stderr and exit status
+    come back as channel 1/2/3 frames. The "Pod" is this host, so paths in commands must exist here."""
 
     def __init__(self):
         self.runs = []
