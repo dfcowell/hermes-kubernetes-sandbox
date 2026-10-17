@@ -136,6 +136,15 @@ def _live(pod: dict) -> bool:
             and not (pod.get("metadata") or {}).get("deletionTimestamp"))
 
 
+def _work_exited(pod: dict) -> bool:
+    """The work container has terminated (any exit code: `kill 1` from inside, an OOM kill). With
+    restartPolicy Never it never comes back, but with docker the dind container keeps the Pod phase
+    Running, so the phase alone would leave the Pod adopted and waited on forever. It still holds
+    its resources, so it keeps counting against capacity (`_live`) until it is replaced."""
+    return any(c.get("name") == "work" and (c.get("state") or {}).get("terminated")
+               for c in (pod.get("status") or {}).get("containerStatuses") or [])
+
+
 def _uid(pod: dict) -> str | None:
     return (pod.get("metadata") or {}).get("uid")
 
@@ -187,7 +196,7 @@ class KubernetesEnvironment(BaseEnvironment):
         md = pod.get("metadata") or {}
         return ((md.get("annotations") or {}).get(ANN_SESSION_KEY) == self._id.session_key
                 and (md.get("labels") or {}).get(LBL_TEMPLATE_HASH) == template_hash(self._s)
-                and _live(pod))
+                and _live(pod) and not _work_exited(pod))
 
     def _wait_gone(self, name: str, get=None) -> bool:
         get = get or self._client.get_pod
@@ -431,6 +440,10 @@ class KubernetesEnvironment(BaseEnvironment):
                 return last
             if (last.get("status") or {}).get("phase") in ("Failed", "Succeeded"):
                 break
+            if _work_exited(last):  # never Ready again: the next command replaces it (_matches)
+                raise EnvironmentConnectionError(
+                    f"Sandbox Pod {name}: the work container exited before it became ready",
+                    retry_hint="Retry the command; the sandbox Pod is replaced automatically.")
             self._notify("waiting for sandbox Pod")
             self._sleep(2)
         conds = [f"{c.get('type')}={c.get('status')} {c.get('message', '')}".strip()

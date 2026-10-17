@@ -331,38 +331,84 @@ def test_failed_pod_is_replaced():
 
 
 # The work container's PID 1 traps TERM, so a `kill 1` / `pkill bash` from inside the sandbox ends
-# it (exit 0; restartPolicy Never). Without docker the Pod then goes Succeeded; with docker the dind
-# container keeps running, so the Pod stays phase Running with Ready=False.
-_WORK_EXITED = {"name": "work", "ready": False, "state": {"terminated": {"exitCode": 0, "reason": "Completed"}}}
+# it (exit 0; restartPolicy Never); an OOM kill ends it with 137. Without docker the Pod then goes
+# Succeeded/Failed; with docker the dind container keeps running, so the Pod stays phase Running
+# with Ready=False. Either way the next command replaces it.
+_WORK_EXITS = {
+    "kill-1": {"name": "work", "ready": False, "state": {"terminated": {"exitCode": 0, "reason": "Completed"}}},
+    "oom": {"name": "work", "ready": False, "state": {"terminated": {"exitCode": 137, "reason": "OOMKilled"}}},
+}
+_DIND_RUNNING = {"name": "dind", "ready": True, "state": {"running": {}}}
 
 
-def test_work_exit_without_docker_is_recreated_on_the_next_command():
+def _fake_clock(e):
+    now = [0.0]
+    e._clock, e._sleep = (lambda: now[0]), (lambda secs: now.__setitem__(0, now[0] + secs))
+    return now
+
+
+@pytest.mark.parametrize("why", sorted(_WORK_EXITS))
+def test_work_exit_without_docker_is_recreated_on_the_next_command(why):
     s = Settings(runtime_class_name="kata", docker=False, ready_timeout_seconds=5)
     e, kube, _ = _env(settings=s)
     assert e.execute("echo hi")["returncode"] == 0
-    kube.pods[ID.pod_name]["status"] = {"phase": "Succeeded", "containerStatuses": [_WORK_EXITED]}
+    phase = "Succeeded" if why == "kill-1" else "Failed"
+    kube.pods[ID.pod_name]["status"] = {"phase": phase, "containerStatuses": [_WORK_EXITS[why]]}
     kube._gets[ID.pod_name] = -10**9  # the fake must not flip it back to Ready
     result = e.execute("echo hi")
     assert result["returncode"] == 0 and result["environment_recreated"] is True
     assert kube.calls.count(("delete", ID.pod_name)) == 1 and kube.calls.count(("create", ID.pod_name)) == 2
 
 
-@pytest.mark.xfail(strict=True, raises=EnvironmentConnectionError,
-                   reason="open design question: a docker Pod whose work container exited stays phase "
-                          "Running (dind lives), so it is adopted and waited on until ready_timeout, "
-                          "and every command fails until the janitor reaps it as idle")
-def test_work_exit_with_docker_is_recreated_on_the_next_command():
+@pytest.mark.parametrize("why", sorted(_WORK_EXITS))
+def test_work_exit_with_docker_is_recreated_on_the_next_command(why):
     e, kube, _ = _env()
     assert S.docker
-    now = [0.0]
-    e._clock, e._sleep = (lambda: now[0]), (lambda secs: now.__setitem__(0, now[0] + secs))
+    now = _fake_clock(e)
     assert e.execute("echo hi")["returncode"] == 0
     kube.pods[ID.pod_name]["status"] = {
         "phase": "Running", "conditions": [{"type": "Ready", "status": "False"}],
-        "containerStatuses": [{"name": "dind", "ready": True, "state": {"running": {}}}, _WORK_EXITED]}
+        "containerStatuses": [_DIND_RUNNING, _WORK_EXITS[why]]}
     kube._gets[ID.pod_name] = -10**9
+    started = now[0]
     result = e.execute("echo hi")
     assert result["returncode"] == 0 and result["environment_recreated"] is True
+    assert kube.calls.count(("delete", ID.pod_name)) == 1 and kube.calls.count(("create", ID.pod_name)) == 2
+    assert now[0] - started < S.ready_timeout_seconds  # replaced at once, not waited on
+
+
+def test_work_exit_while_waiting_for_ready_fails_fast_then_is_replaced():
+    e, kube, _ = _env()
+    now = _fake_clock(e)
+    real_create = kube.create_pod
+
+    def create_then_work_dies(manifest):
+        pod = real_create(manifest)
+        if kube.calls.count(("create", ID.pod_name)) == 1:  # only the first Pod's work exits
+            kube.pods[ID.pod_name]["status"] = {"phase": "Running",
+                                                "containerStatuses": [_DIND_RUNNING, _WORK_EXITS["oom"]]}
+            kube._gets[ID.pod_name] = -10**9
+        return pod
+
+    kube.create_pod = create_then_work_dies
+    with pytest.raises(EnvironmentConnectionError, match="work container exited") as ei:
+        e.execute("echo hi")
+    assert now[0] < S.ready_timeout_seconds and "replaced" in ei.value.retry_hint
+    result = e.execute("echo hi")
+    assert result["returncode"] == 0
+    assert kube.calls.count(("delete", ID.pod_name)) == 1 and kube.calls.count(("create", ID.pod_name)) == 2
+
+
+def test_capacity_still_counts_a_pod_whose_work_exited():
+    # It still holds dind's resources until it is replaced.
+    kube = FakeKube(ready_after=0)
+    s = Settings(runtime_class_name="kata", docker_disk_storage_class="b", max_per_profile=1)
+    other = Identity("mars", "other")
+    kube.create_pod(render_pod(s, other, now_iso="x", created_by="x"))
+    kube.pods[other.pod_name]["status"] = {"phase": "Running", "containerStatuses": [_DIND_RUNNING, _WORK_EXITS["oom"]]}
+    e, _, _ = _env(kube=kube, settings=s)
+    with pytest.raises(EnvironmentConnectionError, match="limit reached"):
+        e.ensure_pod()
 
 
 def test_concurrent_executes_only_the_dropping_one_raises():

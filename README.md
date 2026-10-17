@@ -29,7 +29,11 @@ server but has not been live-tested.
   that never reaps (as `sleep infinity` did before), the completion notice (`notify_on_complete`)
   never arrives and the still-"running" job keeps the sandbox from going idle (only
   `max_lifetime_seconds` ends it). The TERM trap also lets the container stop promptly on Pod
-  deletion instead of waiting out its grace period.
+  deletion instead of waiting out its grace period. It also means a `kill 1` (or `pkill bash`)
+  from inside the sandbox ends the `work` container. An exited `work` container — that, or an
+  OOM kill — is never restarted in place; the next command replaces the whole Pod (even while
+  `dind` keeps running), with the `environment_recreated` notice, and running processes, background
+  jobs and Docker state are lost as in any recreate.
 - Pods come and go: the plugin deletes the session's Pod whenever Hermes ends the environment —
   session close, Hermes's idle reaper, a graceful gateway stop or restart, eviction after an
   infrastructure error — and the janitor reaps idle and expired ones. Only a gateway that dies
