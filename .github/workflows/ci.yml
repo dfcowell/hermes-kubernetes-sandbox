@@ -16,6 +16,8 @@ jobs:
         run: uv pip install --python .venv -e .hermes-src pytest==9.1.1 ruff==0.15.10
       - name: Lint
         run: .venv/bin/ruff check .
+      - name: Allow unprivileged user namespaces (the PID-1 tests run in `unshare -rpf`; they skip without)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Test
         run: .venv/bin/pytest -v
       - name: Test the PyYAML fallback (older Hermes; v0.22+ ships no PyYAML, so these skip above)
