@@ -130,6 +130,7 @@ def main(argv: list[str]) -> int:
         if s.docker:
             r = env.execute("docker run --rm alpine:3.24.2 echo hello-from-inner", timeout=300)
             check("docker run", "hello-from-inner" in r["output"], r["output"].strip()[-100:])
+        check_background_notify(env, check)
         def alive(pidfile):
             probe = (f'p=$(cat {pidfile}) && if kill -0 "$p" 2>/dev/null; '
                      'then echo alive; else echo gone; fi')
@@ -196,6 +197,74 @@ def main(argv: list[str]) -> int:
         delete_workspace(env)
     print(f"{sum(results)}/{len(results)} passed")
     return 0 if results and all(results) else 1
+
+
+def check_background_notify(env, check) -> None:
+    """A background job through Hermes's own path -- the terminal tool's background=True,
+    notify=True (spawn_background_process -> spawn_via_env -> the env poller) -- must queue its
+    completion after it exits. The poller's exit test is `kill -0 <wrapper pid>`, which succeeds on a
+    zombie, so this fails under a PID 1 that does not reap (F-P3-5)."""
+    import tempfile
+    prev = os.environ.get("HERMES_HOME")
+    sid = None
+    done = False
+    with tempfile.TemporaryDirectory() as home:
+        os.environ["HERMES_HOME"] = home  # the registry checkpoints here, not in the operator's ~/.hermes
+        try:
+            from tools.process_registry import process_registry
+            from tools.terminal_tool_background import spawn_background_process
+            started = json.loads(spawn_background_process(
+                command="sleep 5; echo bg-done", env=env, env_type="kubernetes", effective_task_id="e2e-bg",
+                task_id="e2e-bg", session_key="", workdir=None, cwd="/workspace", effective_pty=False,
+                notify_on_complete=True, watch_patterns=None, approval_note=None, pty_disabled_reason=None))
+            sid, pid = started.get("session_id"), started.get("pid")
+            check("background job started with notify (Hermes's terminal-tool path)",
+                  bool(pid) and started.get("notify_on_complete") is True,
+                  f"pid={pid} notify_on_complete={started.get('notify_on_complete')}")
+            evt, held, deadline = None, [], time.time() + 60
+            while evt is None and time.time() < deadline:
+                try:
+                    e = process_registry.completion_queue.get(timeout=1)
+                except Exception:
+                    continue
+                if e.get("session_id") == sid and e.get("type") == "completion":
+                    evt = e
+                else:
+                    held.append(e)
+            for e in held:
+                process_registry.completion_queue.put(e)
+            done = evt is not None
+            check("completion queued after the background job exits",
+                  done and evt.get("exit_code") == 0 and evt.get("completion_reason") == "exited",
+                  "no completion within 60 s" if not done else
+                  f"exit_code={evt.get('exit_code')} reason={evt.get('completion_reason')} "
+                  f"output_seen={'bg-done' in (evt.get('output') or '')}")
+            if pid:
+                r = env.execute(f"kill -0 {int(pid)} 2>/dev/null && echo alive || echo gone")
+                check("wrapper pid gone after exit (kill -0 fails)", r["output"].strip().endswith("gone"),
+                      r["output"].strip()[-20:])
+            zombies = []
+            for _ in range(3):  # a process that exited this instant is not reaped yet: re-look
+                r = env.execute("ps -eo pid=,stat=,comm=")
+                zombies = [ln.strip() for ln in r["output"].splitlines()
+                           if len(ln.split()) >= 2 and ln.split()[1].startswith("Z")]
+                if not zombies:
+                    break
+                time.sleep(1)
+            check("no zombie in the work container", r["returncode"] == 0 and not zombies,
+                  f"returncode={r['returncode']} zombies={zombies[:5]}")
+            r = env.execute("tr '\\0' ' ' < /proc/1/cmdline")
+            check("work PID 1 is the reaping bash loop", "wait $!" in r["output"], r["output"].strip()[-80:])
+        finally:
+            if sid and not done:
+                try:  # stop the poller; never leave it running against the Pod
+                    process_registry.kill_process(sid)
+                except Exception:
+                    pass
+            if prev is None:
+                os.environ.pop("HERMES_HOME", None)
+            else:
+                os.environ["HERMES_HOME"] = prev
 
 
 def delete_workspace(env) -> None:

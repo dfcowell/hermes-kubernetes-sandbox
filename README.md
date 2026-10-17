@@ -21,6 +21,15 @@ server but has not been live-tested.
   where the last Pod left off (see [Workspace persistence](#workspace-persistence)).
 - Commands run over the Kubernetes exec websocket through a fixed bash runner; Hermes's session
   snapshot, cwd tracking, timeouts and interrupts work as with the docker backend.
+- The `work` container's PID 1 is a small bash loop that reaps orphans
+  (`trap 'exit 0' TERM; while :; do sleep infinity & wait $!; done`), the role Docker's `--init`
+  plays for the docker backend. Hermes runs a background command (`background=true`) as a wrapper
+  that outlives the exec that started it, so it is reparented to PID 1, and Hermes decides the job
+  has finished when `kill -0` on that wrapper fails. `kill -0` succeeds on a zombie: under a PID 1
+  that never reaps (as `sleep infinity` did before), the completion notice (`notify_on_complete`)
+  never arrives and the still-"running" job keeps the sandbox from going idle (only
+  `max_lifetime_seconds` ends it). The TERM trap also lets the container stop promptly on Pod
+  deletion instead of waiting out its grace period.
 - Pods come and go: the plugin deletes the session's Pod whenever Hermes ends the environment —
   session close, Hermes's idle reaper, a graceful gateway stop or restart, eviction after an
   infrastructure error — and the janitor reaps idle and expired ones. Only a gateway that dies
@@ -162,6 +171,7 @@ The token file is re-read on every request, so renewing it needs no restart.
 
 The `work` image must provide GNU bash (the runner uses `read -N` and arrays), GNU coreutils
 (`head -c`, `wc`, `timeout`) and util-linux `setsid` (`--wait`). Hermes's default sandbox image does; busybox-only images do not.
+`bash` must be on the image's `PATH`: it is also the container's PID 1 (no init binary is needed).
 
 ## Credentials in the sandbox
 
@@ -306,6 +316,11 @@ Changing a setting that affects the Pod template replaces existing sandbox Pods 
 command (template-hash label), with the `environment_recreated` notice; the workspace volume is
 kept.
 
+A plugin upgrade that changes the Pod template does the same. The reaping PID 1 and the 5 s
+`docker info` readiness timeout changed the template hash: a Pod created by an older plugin keeps
+`sleep infinity` as PID 1 (and its zombies, and the lost background notifications) until the plugin
+replaces it on its next command, or until the Pod is deleted.
+
 ## Development and validation
 
     uv venv -p 3.14 .venv
@@ -381,7 +396,8 @@ fake, so replacing it with a library later stays contained.
 - Scripts are limited to 128 KiB (same as the docker backend).
 - The runner's `exec_id` (used to find and kill a command) is not validated in the Pod: it is an
   internal uuid, never user input.
-- The Pod's PID 1 is `sleep`, which does not reap zombies.
+- Background jobs (`background=true`) are watched by Hermes polling the Pod every 2 s (two execs
+  per poll) for as long as the job runs; their completion is detected within about 2 s of exit.
 - Processes that leave the command's process group (`setsid`, double-forking daemons) escape a
   kill; the Pod is the boundary.
 - A command killed by a signal can make bash print a job notice.

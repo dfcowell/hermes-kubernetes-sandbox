@@ -14,11 +14,23 @@ _WORK_SC = {"runAsUser": 1000, "runAsGroup": 1000, "runAsNonRoot": True, "allowP
             "capabilities": {"drop": ["ALL"]}, "seccompProfile": {"type": "RuntimeDefault"}}
 DOCKER_GID = 2375
 _CLI_DIR = "/opt/docker-cli"
+# PID 1 of the work container must reap: a command's background job outlives the exec that started
+# it and is reparented to PID 1. `sleep infinity` never waits, so the job stays a zombie, `kill -0`
+# keeps succeeding on it, and Hermes's background-process poller never sees the job finish (no
+# completion notice; the session stays "active" and pins the sandbox against the idle reaper).
+# Bash reaps every child, adopted ones included, on SIGCHLD while it blocks in `wait`. The TERM trap
+# matters too: the kernel drops a default-action SIGTERM sent to PID 1, so without a handler every
+# Pod deletion waits out its full grace period. Plain bash: no init binary in the image, and the
+# same command with or without docker.
+WORK_PID1 = ["bash", "-c", "trap 'exit 0' TERM; while :; do sleep infinity & wait $!; done"]
+# `docker info` under Kata regularly takes more than the 1 s default: a killed probe flaps
+# readiness (commands wait for Ready) and orphans the CLI's plugin children.
+_DOCKER_PROBE_TIMEOUT = 5
 
 
 def _spec(s: Settings, claim: str) -> dict:
     work = {
-        "name": "work", "image": s.work_image, "command": ["sleep", "infinity"],
+        "name": "work", "image": s.work_image, "command": list(WORK_PID1),
         "securityContext": copy.deepcopy(_WORK_SC),
         "env": [], "volumeMounts": [{"name": "workspace", "mountPath": "/workspace"}],
         "workingDir": "/workspace",
@@ -41,7 +53,8 @@ def _spec(s: Settings, claim: str) -> dict:
     work["env"].append({"name": "DOCKER_HOST", "value": "unix:///run/docker/docker.sock"})
     # Probe from work, not dind: exec into the dockerd container fails under Kata.
     work["readinessProbe"] = {"exec": {"command": [f"{_CLI_DIR}/bin/docker", "info"]},
-                              "periodSeconds": 2, "failureThreshold": 3}
+                              "periodSeconds": 2, "timeoutSeconds": _DOCKER_PROBE_TIMEOUT,
+                              "failureThreshold": 3}
     work["volumeMounts"] += [
         {"name": "docker-sock", "mountPath": "/run/docker"},
         {"name": "profile", "mountPath": "/etc/profile.d/docker-cli.sh", "subPath": "docker-cli.sh",
