@@ -1,3 +1,5 @@
+import pytest
+
 from kubernetes_sandbox.provider import KubernetesProvider
 
 
@@ -87,3 +89,42 @@ def test_approvals_stay_on_with_forwarded_credentials(_isolated_hermes_home):
     p = KubernetesProvider()
     p._settings()  # the credential settings load
     assert p.skip_container_guards is False  # K12: approvals stay on (amendment §2.6 item 4)
+
+
+def _ready_settings(home, tmp_path):
+    tok = tmp_path / "tok"
+    tok.write_text("x")
+    _write(home, f"docker: false\ntoken_path: {tok}\nca_path: \"\"\n")
+
+
+@pytest.mark.parametrize("cwd,warns", [(None, "is unset"), ("", "is unset"), ("/tmp", "outside the persistent workspace"),
+                                       ("/workspacex", "outside"), ("/workspace", None), ("/workspace/proj", None)])
+def test_terminal_cwd_warning(_isolated_hermes_home, tmp_path, monkeypatch, caplog, cwd, warns):
+    _ready_settings(_isolated_hermes_home, tmp_path)
+    if cwd is None:
+        monkeypatch.delenv("TERMINAL_CWD", raising=False)
+    else:
+        monkeypatch.setenv("TERMINAL_CWD", cwd)
+    p = KubernetesProvider()
+    assert p.check_requirements({}) is True  # a warning, never a failure: commands still run
+    row = [r for r in p.doctor_checks() if r[1] == "Kubernetes terminal.cwd"]
+    assert len(row) == 1
+    if warns:
+        assert warns in caplog.text and "terminal.cwd" in caplog.text
+        assert row[0][0] is False and warns in row[0][2]
+    else:
+        assert "terminal.cwd" not in caplog.text
+        assert row[0][0] is True
+
+
+def test_cwd_warning_reads_the_profile_scope_not_the_process_env(monkeypatch):
+    """Multiplexed: the routed profile's terminal policy decides, not the gateway process's environment."""
+    from tools.terminal_scope import reset_terminal_scope, set_terminal_scope
+    from kubernetes_sandbox.provider import cwd_warning
+    monkeypatch.setenv("TERMINAL_CWD", "/tmp")
+    token = set_terminal_scope({"TERMINAL_CWD": "/workspace"})
+    try:
+        assert cwd_warning() is None
+    finally:
+        reset_terminal_scope(token)
+    assert "outside" in cwd_warning()

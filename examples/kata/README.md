@@ -40,7 +40,8 @@ kubectl apply -f janitor.yaml
 ```
 
 Then put `kubernetes-sandbox.yaml` (edit the StorageClass) in `$HERMES_HOME` and set
-`terminal.backend: kubernetes` in Hermes. Optional settings in that file:
+`terminal.backend: kubernetes` and `terminal.cwd: /workspace` in Hermes (see Install in the
+top-level README). Optional settings in that file:
 
 - Forge access: `forward_env` + `git_credentials` + `extra_pod_labels` and the commented policy in
   `networkpolicy.yaml` (README, Credentials in the sandbox).

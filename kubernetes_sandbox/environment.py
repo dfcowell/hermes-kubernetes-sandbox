@@ -19,7 +19,8 @@ from tools.environments.remote_common import resolve_passthrough_env
 from .credentials import credential_names, git_config_env
 from .exec_stream import ExecDisconnected, ExecFailed, StreamingExecHandle, connect_exec
 from .kube import Conflict, KubeClient, KubeError, NotFound, QuotaExceeded
-from .naming import ANN_LAST_USED, ANN_SESSION_KEY, ANN_UNUSED_SINCE, LBL_PROFILE, LBL_TEMPLATE_HASH, MANAGED_BY, Identity, slug
+from .naming import (ANN_LAST_USED, ANN_SESSION_KEY, ANN_UNUSED_SINCE, HERMES_DEFAULT_CWD, LBL_PROFILE,
+                     LBL_TEMPLATE_HASH, MANAGED_BY, WORKSPACE, Identity, slug)
 from .podspec import identity_labels, render_pod, render_workspace_claim, template_hash
 from .runner import exec_argv, kill_argv, stdin_payload
 from .settings import _SHELL_NAME, WITHHELD_ENV_PREFIXES, Settings, interlock_error
@@ -151,7 +152,9 @@ class KubernetesEnvironment(BaseEnvironment):
 
     def __init__(self, *, settings: Settings, identity: Identity, cwd: str, timeout: int,
                  client=None, exec_connect=None, clock=time.time, sleep=time.sleep):
-        super().__init__(cwd=cwd or "/workspace", timeout=timeout)
+        # Hermes's literal default cwd for plugin backends (no terminal.cwd) is /root, which the work container's
+        # user (UID 1000) cannot enter: start in the workspace instead (see also _wrap_command).
+        super().__init__(cwd=cwd if cwd and cwd != HERMES_DEFAULT_CWD else WORKSPACE, timeout=timeout)
         # Read by Hermes's is_persistent_env(): the Pod lives for the session, not the turn.
         self._session_scoped = True
         self._initial_cwd = self.cwd
@@ -454,6 +457,15 @@ class KubernetesEnvironment(BaseEnvironment):
             self._bootstrap_attempted = True  # once per Pod: a failed bootstrap costs up to 60 s
             self.init_session()
         self._touch_last_used()
+
+    def _wrap_command(self, command: str, cwd: str) -> str:
+        # Hermes plans every command's cwd itself and passes it explicitly: without terminal.cwd that is the
+        # literal /root (its default for non-local backends), which the work container's user (UID 1000)
+        # cannot enter, so the command would fail `cd: /root: Permission denied` (exit 126). Run it in the
+        # environment's initial cwd (the workspace) instead; any other cwd, the session's own included, passes.
+        if cwd == HERMES_DEFAULT_CWD:
+            cwd = self._initial_cwd
+        return super()._wrap_command(command, cwd)
 
     def _exec_env_script(self) -> str:
         """The forwarded environment of ONE exec, as shell lines the runner evals (never in an argv, the exec

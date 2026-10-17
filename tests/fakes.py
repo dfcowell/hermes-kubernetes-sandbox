@@ -131,3 +131,46 @@ class FakeExec:
                 pass
 
         return StreamingExecHandle(lambda: Conn(), payload, on_kill)
+
+
+class LocalExec:
+    """exec_connect replacement that RUNS the runner on this machine (bash), speaking the exec channel protocol:
+    the stdin frames are collected, the runner is started with them on its stdin (closed afterwards: the runner
+    delimits its stdin in-band, so only Kata cares, see exec_stream.py), and its stdout/stderr and exit status come back as channel 1/2/3 frames. The
+    "Pod" is this host, so paths in commands must exist here."""
+
+    def __init__(self):
+        self.runs = []
+
+    def __call__(self, pod, container, argv, payload, on_kill):
+        from kubernetes_sandbox.exec_stream import ERROR, STDERR, STDIN, STDOUT, StreamingExecHandle, encode_frame
+        import json
+        import subprocess
+        self.runs.append({"pod": pod, "container": container, "argv": argv, "payload": payload})
+
+        class Conn:
+            def __init__(self):
+                self.stdin, self.frames = b"", None
+
+            def send(self, d):
+                assert d[0] == STDIN, d[:1]
+                self.stdin += d[1:]
+
+            def recv(self, timeout=None):
+                if self.frames is None:
+                    proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE)
+                    out, err = proc.communicate(self.stdin, timeout=60)
+                    rc = proc.returncode
+                    status = ({"status": "Success"} if rc == 0 else
+                              {"status": "Failure", "details": {"causes": [{"reason": "ExitCode", "message": str(rc)}]}})
+                    self.frames = [encode_frame(STDOUT, out), encode_frame(STDERR, err),
+                                   encode_frame(ERROR, json.dumps(status).encode())]
+                if self.frames:
+                    return self.frames.pop(0)
+                raise ConnectionError("closed")
+
+            def close(self):
+                pass
+
+        return StreamingExecHandle(lambda: Conn(), payload, on_kill)

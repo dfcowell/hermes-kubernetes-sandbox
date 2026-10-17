@@ -6,7 +6,8 @@ import pathlib
 
 from agent.terminal_env_provider import TerminalEnvironmentProvider
 
-from .naming import Identity
+from .naming import HERMES_DEFAULT_CWD, WORKSPACE, Identity
+from .probe import ProbeEnvironment, is_backend_probe
 from .settings import SettingsError, interlock_error, load_settings
 
 log = logging.getLogger(__name__)
@@ -23,6 +24,28 @@ def _profile(home: pathlib.Path) -> str:
         return profile_name_for_home(home) or "default"
     except Exception:
         return "default"
+
+
+def _configured_cwd() -> str:
+    """The profile's TERMINAL_CWD (terminal.cwd), "" when unset. Reads Hermes's profile-scoped terminal policy."""
+    try:
+        from tools.terminal_scope import terminal_env
+        return (terminal_env("TERMINAL_CWD", "") or "").strip()
+    except Exception:  # an older Hermes without terminal_scope, or a refusal scope: the process env
+        import os
+        return (os.environ.get("TERMINAL_CWD") or "").strip()
+
+
+def cwd_warning() -> str | None:
+    """Why the configured terminal.cwd is a poor fit for this backend, or None when it is fine."""
+    cwd = _configured_cwd()
+    if not cwd:
+        return (f"terminal.cwd is unset: Hermes then runs commands in {HERMES_DEFAULT_CWD}, which the sandbox "
+                f"user cannot enter (the plugin maps it to {WORKSPACE}); set terminal.cwd: {WORKSPACE}")
+    if cwd != WORKSPACE and not cwd.startswith(WORKSPACE + "/"):
+        return (f"terminal.cwd is {cwd}, outside the persistent workspace {WORKSPACE}: files written relative "
+                f"to it are lost with the Pod")
+    return None
 
 
 def _ca_problem(s) -> str | None:
@@ -81,6 +104,9 @@ class KubernetesProvider(TerminalEnvironmentProvider):
         if ca:
             log.error("kubernetes sandbox: %s", ca)
             return False
+        cw = cwd_warning()
+        if cw:
+            log.warning("kubernetes sandbox: %s", cw)  # a warning, not a failure: commands still run
         return True
 
     def probe(self):
@@ -97,13 +123,23 @@ class KubernetesProvider(TerminalEnvironmentProvider):
         return ("ready", f"namespace {s.namespace}") if self.is_available() else (
             "needs_setup", f"no API token at {s.token_path}")
 
+    def doctor_checks(self):
+        rows = super().doctor_checks()
+        cw = cwd_warning()
+        rows.append((cw is None, "Kubernetes terminal.cwd", cw or f"({_configured_cwd()})"))
+        return rows
+
     def setup_instructions(self):
         return ["Write $HERMES_HOME/kubernetes-sandbox.yaml (see examples/kata/README.md),",
-                "mount a ServiceAccount token for the sandbox namespace, then: hermes config set terminal.backend kubernetes"]
+                "mount a ServiceAccount token for the sandbox namespace, then: hermes config set terminal.backend kubernetes",
+                f"and: hermes config set terminal.cwd {WORKSPACE} (Hermes's default, {HERMES_DEFAULT_CWD}, "
+                "is not usable by the sandbox user)"]
 
     def create_environment(self, *, cwd, timeout, task_id="default", image=None, container_config=None, **kwargs):
+        if is_backend_probe(task_id, kwargs):
+            return ProbeEnvironment(cwd=cwd, timeout=timeout)  # no Pod, no PVC (kubernetes_sandbox/probe.py)
         from .environment import KubernetesEnvironment
         home = _home()
         s = self._settings()  # `image` (Hermes's per-backend image) is ignored: work_image is the setting
         return KubernetesEnvironment(settings=s, identity=Identity(_profile(home), task_id or "default"),
-                                     cwd=cwd or "/workspace", timeout=timeout)
+                                     cwd=cwd, timeout=timeout)  # it maps Hermes's default /root to /workspace

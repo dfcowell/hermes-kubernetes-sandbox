@@ -20,8 +20,8 @@ kubectl apply -f rbac.yaml     # change `hermes` to your Hermes namespace
 
 Run the Hermes Pod as `hermes-sandbox-driver` with a projected token, as described in the
 [Kata README](../kata/README.md#give-the-gateway-the-driver-credentials), copy
-`kubernetes-sandbox.yaml` into `$HERMES_HOME`, and set `terminal.backend: kubernetes`. This example
-uses the namespace `agent-sandbox-runc` so it can coexist with the Kata example.
+`kubernetes-sandbox.yaml` into `$HERMES_HOME`, and set `terminal.backend: kubernetes` and
+`terminal.cwd: /workspace`. This example uses the namespace `agent-sandbox-runc` so it can coexist with the Kata example.
 
 Each session's `/workspace` is a PVC (on the cluster's default StorageClass unless
 `workspace_storage_class` is set) that outlives the session's Pods: the plugin deletes a Pod when

@@ -41,7 +41,16 @@ git clone https://github.com/dfcowell/hermes-kubernetes-sandbox "$HERMES_HOME/pl
 hermes plugins enable kubernetes-sandbox
 # write $HERMES_HOME/kubernetes-sandbox.yaml (or set HERMES_K8S_* variables), then:
 hermes config set terminal.backend kubernetes
+hermes config set terminal.cwd /workspace
 ```
+
+**Set `terminal.cwd: /workspace`.** Without it Hermes runs every command of a non-local backend in
+`/root` (its built-in default for container and plugin backends), which the sandbox user (UID 1000)
+cannot enter. The plugin maps that literal `/root` to the environment's starting directory
+(`/workspace`), so commands still work, but a `terminal.cwd` keeps Hermes's own cwd planning, the
+session's recorded cwd and the system prompt pointing at the persistent workspace. `hermes doctor`
+and the backend's requirements check warn when `terminal.cwd` is unset or outside `/workspace`. An
+explicit `workdir` on a command is honoured as given (`/root/...` subdirectories included).
 
 Then set up the cluster side from one of the examples:
 
@@ -55,6 +64,20 @@ Then set up the cluster side from one of the examples:
 thing that deletes workspace volumes (see below). It also reaps idle Pods, finished Pods, Pods
 left behind by a crashed gateway and Pods past `max_lifetime_seconds` (the janitor is what
 enforces the `hermes-sandbox/max-lifetime-seconds` annotation the plugin writes).
+
+### System-prompt probe
+
+Hermes describes a remote backend in the system prompt by building a throwaway environment
+(`task_id="prompt-backend-probe"`), running `uname` in it and tearing it down, once per profile per
+gateway process (`agent/prompt_builder.py`, `_run_backend_probe`). For this backend that would be a
+whole sandbox: a Pod cold start blocking the prompt build (about 40 s on Kata), a second Pod next
+to the session's own and a workspace volume left for the janitor. The plugin answers the probe with
+a Pod-less stub instead (`kubernetes_sandbox/probe.py`): it reports `os=Linux` and an unknown
+kernel, so the prompt says `OS: Linux`, and touches nothing in the cluster. Hermes v0.22.1 passes
+`probe_only=True` for the probe but drops it before it reaches a plugin provider, so the literal
+task_id is the signal; the stub also honours `probe_only` for when Hermes forwards it.
+**A Hermes bump must re-check that literal against `agent/prompt_builder.py`**:
+`tests/test_hermes_paths.py` pins it against the Hermes under test and fails if it changes.
 
 ## Workspace persistence
 
@@ -352,6 +375,10 @@ fake, so replacing it with a library later stays contained.
 - `cleanup()` runs without the env lock; two concurrent first commands can both run the session
   bootstrap (harmless).
 - The RBAC grants `watch` and `pods/log`, reserved for later use.
+- The system-prompt probe is answered without a Pod, so the prompt does not report the sandbox's
+  kernel (under Kata it would be the guest's anyway).
+- A command whose explicit cwd is exactly `/root` runs in `/workspace` (Hermes's default cwd cannot
+  be told apart from a deliberate one; the sandbox user cannot enter `/root` either way).
 - `docker_cli: init-copy` copies `cli-plugins/docker-*`; an image with an empty plugins
   directory fails the glob.
 - Creating a Pod can wait up to `ready_timeout_seconds` on the caller's thread and is not
