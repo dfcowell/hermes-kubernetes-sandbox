@@ -330,6 +330,41 @@ def test_failed_pod_is_replaced():
     assert ("delete", ID.pod_name) in kube.calls and ("create", ID.pod_name) in kube.calls
 
 
+# The work container's PID 1 traps TERM, so a `kill 1` / `pkill bash` from inside the sandbox ends
+# it (exit 0; restartPolicy Never). Without docker the Pod then goes Succeeded; with docker the dind
+# container keeps running, so the Pod stays phase Running with Ready=False.
+_WORK_EXITED = {"name": "work", "ready": False, "state": {"terminated": {"exitCode": 0, "reason": "Completed"}}}
+
+
+def test_work_exit_without_docker_is_recreated_on_the_next_command():
+    s = Settings(runtime_class_name="kata", docker=False, ready_timeout_seconds=5)
+    e, kube, _ = _env(settings=s)
+    assert e.execute("echo hi")["returncode"] == 0
+    kube.pods[ID.pod_name]["status"] = {"phase": "Succeeded", "containerStatuses": [_WORK_EXITED]}
+    kube._gets[ID.pod_name] = -10**9  # the fake must not flip it back to Ready
+    result = e.execute("echo hi")
+    assert result["returncode"] == 0 and result["environment_recreated"] is True
+    assert kube.calls.count(("delete", ID.pod_name)) == 1 and kube.calls.count(("create", ID.pod_name)) == 2
+
+
+@pytest.mark.xfail(strict=True, raises=EnvironmentConnectionError,
+                   reason="open design question: a docker Pod whose work container exited stays phase "
+                          "Running (dind lives), so it is adopted and waited on until ready_timeout, "
+                          "and every command fails until the janitor reaps it as idle")
+def test_work_exit_with_docker_is_recreated_on_the_next_command():
+    e, kube, _ = _env()
+    assert S.docker
+    now = [0.0]
+    e._clock, e._sleep = (lambda: now[0]), (lambda secs: now.__setitem__(0, now[0] + secs))
+    assert e.execute("echo hi")["returncode"] == 0
+    kube.pods[ID.pod_name]["status"] = {
+        "phase": "Running", "conditions": [{"type": "Ready", "status": "False"}],
+        "containerStatuses": [{"name": "dind", "ready": True, "state": {"running": {}}}, _WORK_EXITED]}
+    kube._gets[ID.pod_name] = -10**9
+    result = e.execute("echo hi")
+    assert result["returncode"] == 0 and result["environment_recreated"] is True
+
+
 def test_concurrent_executes_only_the_dropping_one_raises():
     from kubernetes_sandbox.exec_stream import StreamingExecHandle
 

@@ -48,16 +48,17 @@ def test_docker_readiness_probe_tolerates_slow_docker_info():
     assert p["periodSeconds"] == 2 and p["failureThreshold"] == 3
 
 
-def test_new_pid1_changes_the_template_hash():
+@pytest.mark.parametrize("s", MODES, ids=["image-volume", "init-copy", "no-docker"])
+def test_new_pid1_changes_the_template_hash(s, monkeypatch):
     # Documented consequence: Pods created before the upgrade keep `sleep infinity` until the
-    # plugin replaces them on their next command.
-    old = _spec(KATA, "<workspace-claim>")
-    for c in old["containers"]:
-        if c["name"] == "work":
-            c["command"] = SLEEP_PID1
-    import hashlib
-    old_hash = hashlib.sha256(json.dumps({"spec": old, "annotations": {}}, sort_keys=True).encode()).hexdigest()[:8]
-    assert template_hash(KATA) != old_hash
+    # plugin replaces them on their next command. Both hashes come from the real template_hash,
+    # so a key it adds later cannot make the comparison pass on its own.
+    from kubernetes_sandbox import podspec
+    new_hash = template_hash(s)
+    assert template_hash(s) == new_hash  # positive control: the same template hashes equal
+    monkeypatch.setattr(podspec, "WORK_PID1", SLEEP_PID1)
+    assert _work(s)["command"] == SLEEP_PID1  # the patch reached the rendered template
+    assert template_hash(s) != new_hash
 
 
 # ---- PID-namespace tests --------------------------------------------------------------------
@@ -164,17 +165,17 @@ _ORPHAN_PRELUDE = "( sleep 2 & sleep 1 ) &"
 @needs_pidns
 def test_reaper_pid1_reaps_adopted_orphans(namespace):
     ns = namespace(WORK_PID1, _ORPHAN_PRELUDE)
-    time.sleep(3.5)
+    # Once both orphans have finished, a reaper leaves only its own `sleep infinity` (a zombie
+    # would still be listed, as in the control below).
+    assert _wait_for(lambda: len(ns.descendants()) == 1, 15), ns.descendants()
     states = ns.descendants()
     assert "Z" not in states.values(), states
-    assert len(states) == 1  # only the reaper's own `sleep infinity`
 
 
 @needs_pidns
 def test_sleep_pid1_leaves_zombies(namespace):  # negative control: the test can see the bug
     ns = namespace(SLEEP_PID1, _ORPHAN_PRELUDE)
-    time.sleep(3.5)
-    assert list(ns.descendants().values()).count("Z") == 2
+    assert _wait_for(lambda: list(ns.descendants().values()).count("Z") == 2, 15), ns.descendants()
 
 
 @needs_pidns
@@ -274,7 +275,9 @@ def test_hermes_background_notify_is_lost_under_sleep_pid1(namespace, tmp_path):
         assert _alive_in(env, started["pid"])  # kill -0 succeeds on the zombie wrapper
         assert "Z" in env.ns.descendants().values()
     finally:
+        # Best-effort cleanup with no assert: a failure here must not mask one above.
         env.closed = True  # the poller's next execute raises: it finishes the session as "lost"
         session = process_registry.get(started["session_id"])
-        assert _wait_for(lambda: session.exited, 10)
+        poller_stopped = _wait_for(lambda: session.exited, 10)
         _completion(started["session_id"], 1)  # drain the "lost" notice
+    assert poller_stopped, "the poller kept running after the sandbox was closed"

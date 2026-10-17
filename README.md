@@ -397,7 +397,8 @@ fake, so replacing it with a library later stays contained.
 - The runner's `exec_id` (used to find and kill a command) is not validated in the Pod: it is an
   internal uuid, never user input.
 - Background jobs (`background=true`) are watched by Hermes polling the Pod every 2 s (two execs
-  per poll) for as long as the job runs; their completion is detected within about 2 s of exit.
+  per poll) for as long as the job runs; their completion is detected within a few seconds of exit
+  (each poll is a 2 s sleep plus those two execs, and an exec is not instant under Kata).
 - Processes that leave the command's process group (`setsid`, double-forking daemons) escape a
   kill; the Pod is the boundary.
 - A command killed by a signal can make bash print a job notice.
