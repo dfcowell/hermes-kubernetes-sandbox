@@ -154,30 +154,51 @@ def test_the_profile_scope_decides(sandbox_settings, monkeypatch):
     assert hermes_default_cwd("kubernetes") is None
 
 
-def test_without_hermes_s_resolver_the_creation_cwd_is_the_default(sandbox_settings, no_hermes_resolver, caplog):
-    assert hermes_default_cwd("kubernetes", "/home/hermes") == "/home/hermes"
-    env = KubernetesProvider().create_environment(cwd="/home/hermes", timeout=60, task_id="t")
-    assert env.cwd == WORKSPACE
-    assert "cd -- /workspace" in env._wrap_command("pwd", "/home/hermes")  # per command: the same value
-    assert "cd -- /tmp" in env._wrap_command("pwd", "/tmp")
-    assert "not mapped" not in caplog.text
-
-
-def test_without_hermes_s_resolver_a_configured_cwd_is_not_guessed(sandbox_settings, no_hermes_resolver,
-                                                                   monkeypatch, caplog):
-    monkeypatch.setenv("TERMINAL_CWD", "/workspace")
+@pytest.mark.parametrize("terminal_cwd", [None, "/workspace"])
+@pytest.mark.parametrize("given", ["/root", "/workspace/proj", "/home/hermes"])
+def test_without_hermes_s_resolver_nothing_is_guessed(sandbox_settings, no_hermes_resolver, monkeypatch, caplog,
+                                                      terminal_cwd, given):
+    """The creation cwd is never taken as the default: it can be an ACP/gateway override or a recorded cwd."""
+    if terminal_cwd:
+        monkeypatch.setenv("TERMINAL_CWD", terminal_cwd)
     for _ in range(3):
-        env = KubernetesProvider().create_environment(cwd="/root", timeout=60, task_id="t")
-        assert env.cwd == "/root" and "cd -- /root" in env._wrap_command("pwd", "/root")
+        env = KubernetesProvider().create_environment(cwd=given, timeout=60, task_id="t")
+        assert env.cwd == given and env._initial_cwd == given
+        assert f"cd -- {given}" in env._wrap_command("pwd", given)
+        assert "cd -- /root" in env._wrap_command("pwd", "/root")
     assert caplog.text.count("not mapped") == 1  # logged once per profile
+    assert "resolver is unavailable" in caplog.text
+
+
+@pytest.mark.parametrize("value", ["/root", ["/root", None], None, (), (1, None)])
+def test_an_unexpected_resolver_result_maps_nothing(sandbox_settings, monkeypatch, caplog, value):
+    from tools import terminal_tool
+    monkeypatch.setattr(terminal_tool, "_resolve_config_cwd", lambda env_type, mount: value)
+    assert hermes_default_cwd("kubernetes") is None
+    assert hermes_default_cwd("kubernetes") is None
+    assert caplog.text.count("unexpected value") == 1
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_an_empty_terminal_cwd_maps_nothing_with_its_own_reason(sandbox_settings, monkeypatch, caplog, value):
+    monkeypatch.setenv("TERMINAL_CWD", value)  # Hermes's _tenv returns it as is: no default substituted
+    assert hermes_default_cwd("kubernetes") is None
+    assert caplog.text.count("set but empty") == 1
+
+
+def test_whitespace_around_terminal_cwd_compares_stripped(sandbox_settings, monkeypatch):
+    from tools import terminal_tool
+    monkeypatch.setenv("TERMINAL_CWD", " /workspace ")
+    monkeypatch.setattr(terminal_tool, "_resolve_config_cwd", lambda env_type, mount: (" /workspace ", None))
+    assert hermes_default_cwd("kubernetes") is None  # Hermes uses terminal.cwd: not taken for a default
 
 
 def test_under_a_refusal_scope_nothing_is_mapped(sandbox_settings, caplog):
     from tools import terminal_scope
     token = terminal_scope.set_terminal_scope(terminal_scope.TerminalPolicyRefusal("unreadable"))
     try:
-        assert hermes_default_cwd("kubernetes", "/root") is None
-        assert hermes_default_cwd("kubernetes", "/root") is None
+        assert hermes_default_cwd("kubernetes") is None
+        assert hermes_default_cwd("kubernetes") is None
     finally:
         terminal_scope.reset_terminal_scope(token)
     assert caplog.text.count("not mapped") == 1

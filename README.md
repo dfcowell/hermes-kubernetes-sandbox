@@ -53,10 +53,11 @@ pointing at the persistent workspace.
 As a backstop the plugin maps Hermes's default cwd to the environment's starting directory
 (`/workspace`), at creation and per command, so commands still work without it. It keeps no copy of
 that default: it asks Hermes's own resolver for this backend under the profile's terminal scope, so
-a Hermes patch that moves the default is followed with no plugin change. Without that resolver (a
-renamed function) and with `terminal.cwd` unset, the cwd Hermes passed at environment creation is
-taken as the default. Otherwise (a configured `terminal.cwd` it cannot check, or an unreadable
-terminal policy) it does not guess: nothing is mapped and a warning is logged once per profile.
+a Hermes patch that moves the default is followed with no plugin change. Without a usable answer
+(a renamed resolver, an unexpected return value, an empty `terminal.cwd`, or an unreadable terminal
+policy) it does not guess: nothing is mapped and a warning is logged once per profile. The cwd
+Hermes passes at environment creation is never taken for the default, since it can be an ACP or
+gateway override or the session's recorded cwd.
 With a usable `terminal.cwd` configured nothing is mapped either; Hermes never plans its default then. `hermes doctor`
 reports a hard FAIL row when `terminal.cwd` is unset or outside `/workspace` (its API has no warning
 tier, although commands still work); the backend's requirements check only logs a warning, once per

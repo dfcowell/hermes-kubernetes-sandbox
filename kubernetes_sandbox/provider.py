@@ -54,39 +54,46 @@ def _unmapped(reason: str) -> None:
                     reason, WORKSPACE, WORKSPACE)
 
 
-def _resolve_with_hermes(env_type: str) -> str | None:
-    """Hermes's own planned cwd for *env_type* from the profile's terminal.cwd, or None when unobtainable."""
+def _resolve_with_hermes(env_type: str) -> tuple[str | None, str]:
+    """(Hermes's own planned cwd for *env_type* from the profile's terminal.cwd, why not), the cwd unstripped.
+
+    None when the resolver is unobtainable or returns something other than its (cwd, host_cwd) tuple."""
     try:
         from tools.terminal_tool import _resolve_config_cwd
-        cwd = _resolve_config_cwd(env_type, False)[0]
+        result = _resolve_config_cwd(env_type, False)
     except Exception as e:  # ImportError (a renamed resolver), TerminalPolicyUnavailable, a changed signature
         log.debug("kubernetes sandbox: Hermes's cwd resolver is unavailable: %r", e)
-        return None
-    return cwd if isinstance(cwd, str) and cwd else None
+        return None, "Hermes's cwd resolver is unavailable"
+    if not isinstance(result, tuple) or not result or not isinstance(result[0], str):
+        log.debug("kubernetes sandbox: Hermes's cwd resolver returned %r", type(result))
+        return None, "Hermes's cwd resolver returned an unexpected value"
+    return result[0], ""
 
 
-def hermes_default_cwd(env_type: str, given_cwd: str | None = None) -> str | None:
+def hermes_default_cwd(env_type: str) -> str | None:
     """The cwd Hermes plans for this backend in place of terminal.cwd (unset, or unusable in a container),
     or None when Hermes is using the configured terminal.cwd or the default cannot be known.
 
     Asked of Hermes itself, never copied: its own resolver (tools/terminal_tool.py _resolve_config_cwd, which
     reads TERMINAL_CWD through the profile's terminal scope; read-only, it only logs when it discards an
-    unusable terminal.cwd). Without that resolver (renamed upstream) and with terminal.cwd unset, the cwd
-    Hermes passed at environment creation IS its default. Otherwise (a refusal scope, or a configured
-    terminal.cwd that cannot be checked) it does not guess: None, logged once per profile."""
-    configured = _configured_cwd()
+    unusable terminal.cwd). Without a usable answer (a refusal scope, a renamed resolver, an unexpected return
+    value, an empty terminal.cwd) it does not guess: None, logged once per profile. The cwd Hermes passes at
+    creation is never taken as the default: it can be an ACP/gateway override or the session's recorded cwd."""
+    configured = _configured_cwd()  # stripped
     if configured is None:
         _unmapped("the profile's terminal policy is unreadable")
         return None
-    resolved = _resolve_with_hermes(env_type)
-    if resolved:
-        if configured and resolved == os.path.expanduser(configured):
-            return None  # Hermes uses terminal.cwd as given: there is no default in play
-        return resolved
-    if not configured and given_cwd:
-        return given_cwd
-    _unmapped("Hermes's cwd resolver is unavailable")
-    return None
+    resolved, why = _resolve_with_hermes(env_type)
+    if resolved is None:
+        _unmapped(why)
+        return None
+    resolved = resolved.strip()  # compared stripped, like the configured side
+    if not resolved:
+        _unmapped("terminal.cwd is set but empty, so Hermes resolves no cwd")
+        return None
+    if configured and resolved == os.path.expanduser(configured):
+        return None  # Hermes uses terminal.cwd as given: there is no default in play
+    return resolved
 
 
 def cwd_warning(env_type: str = "kubernetes") -> str | None:
@@ -95,7 +102,7 @@ def cwd_warning(env_type: str = "kubernetes") -> str | None:
     if cwd is None:
         return None
     if not cwd:
-        default = _resolve_with_hermes(env_type)
+        default = (_resolve_with_hermes(env_type)[0] or "").strip()
         return (f"terminal.cwd is unset: Hermes then runs commands in its default cwd"
                 f"{f' ({default})' if default else ''}, which the sandbox user cannot enter (the plugin maps it "
                 f"to {WORKSPACE}); set terminal.cwd: {WORKSPACE}")
@@ -203,4 +210,4 @@ class KubernetesProvider(TerminalEnvironmentProvider):
         s = self._settings()  # `image` (Hermes's per-backend image) is ignored: work_image is the setting
         return KubernetesEnvironment(settings=s, identity=Identity(_profile(home), task_id or "default"),
                                      cwd=cwd, timeout=timeout,
-                                     default_cwd=hermes_default_cwd(self.name, cwd))  # mapped to /workspace
+                                     default_cwd=hermes_default_cwd(self.name))  # mapped to /workspace
