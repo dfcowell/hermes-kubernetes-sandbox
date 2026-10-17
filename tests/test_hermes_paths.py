@@ -2,8 +2,9 @@
 
 - the system-prompt backend probe (``agent/prompt_builder.py``): must be answered by the Pod-less stub, never by a
   real sandbox (a Pod cold start blocking the prompt build, plus a workspace PVC left for the janitor);
-- ``terminal_tool`` with no ``terminal.cwd``: Hermes plans the literal ``/root`` as every command's cwd, which the
-  sandbox user (UID 1000) cannot enter; the command must run in the workspace instead.
+- ``terminal_tool`` with no ``terminal.cwd``: Hermes plans its default cwd for the backend (``/root`` in v0.22.1) as
+  every command's cwd, which the sandbox user (UID 1000) cannot enter; the command must run in the workspace instead.
+  The plugin keeps no copy of that default: it asks Hermes's own resolver (``provider.hermes_default_cwd``).
 """
 import inspect
 import json
@@ -12,9 +13,9 @@ import os
 import pytest
 from fakes import FakeKube, LocalExec
 from kubernetes_sandbox import environment as envmod
-from kubernetes_sandbox.naming import HERMES_DEFAULT_CWD, WORKSPACE
+from kubernetes_sandbox.naming import WORKSPACE
 from kubernetes_sandbox.probe import PROBE_OUTPUT, PROBE_TASK_ID, ProbeEnvironment
-from kubernetes_sandbox.provider import KubernetesProvider
+from kubernetes_sandbox.provider import KubernetesProvider, hermes_default_cwd
 
 
 @pytest.fixture
@@ -82,25 +83,120 @@ def test_hermes_prompt_probe_uses_the_stub(registered, no_real_sandbox):
         prompt_builder._BACKEND_PROBE_CACHE.clear()
 
 
-@pytest.mark.parametrize("given,want", [("/root", WORKSPACE), ("", WORKSPACE), (None, WORKSPACE),
-                                        ("/workspace/proj", "/workspace/proj"), ("/tmp", "/tmp")])
-def test_create_environment_maps_the_hermes_default_cwd(tmp_path, _isolated_hermes_home, given, want):
+@pytest.fixture
+def sandbox_settings(tmp_path, _isolated_hermes_home, monkeypatch):
     tok = tmp_path / "tok"
     tok.write_text("x")
     (_isolated_hermes_home / "kubernetes-sandbox.yaml").write_text(f"docker: false\ntoken_path: {tok}\n")
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+
+
+@pytest.fixture
+def hermes_default(monkeypatch):
+    """Changes Hermes's built-in default cwd for this backend, as an upstream patch could."""
+    from tools import terminal_tool
+
+    def set_default(value):
+        monkeypatch.setattr(terminal_tool, "_DEFAULT_CWD_BY_BACKEND",
+                            {**terminal_tool._DEFAULT_CWD_BY_BACKEND, "kubernetes": value})
+    return set_default
+
+
+@pytest.fixture
+def no_hermes_resolver(monkeypatch):
+    """A Hermes whose resolver was renamed or removed: `from tools.terminal_tool import ...` fails."""
+    from tools import terminal_tool
+    monkeypatch.delattr(terminal_tool, "_resolve_config_cwd")
+
+
+def test_the_default_comes_from_hermes_s_own_resolver(sandbox_settings):
+    from tools import terminal_tool
+    assert hermes_default_cwd("kubernetes") == terminal_tool._resolve_config_cwd("kubernetes", False)[0] == "/root"
+
+
+def test_a_changed_hermes_default_is_followed_without_a_code_change(sandbox_settings, hermes_default):
+    hermes_default("/home/hermes")
+    assert hermes_default_cwd("kubernetes") == "/home/hermes"
+    env = KubernetesProvider().create_environment(cwd="/home/hermes", timeout=60, task_id="t")
+    assert env.cwd == WORKSPACE
+    assert "cd -- /workspace" in env._wrap_command("pwd", "/home/hermes")
+    assert "cd -- /root" in env._wrap_command("pwd", "/root")  # no longer Hermes's default: passes as given
+
+
+@pytest.mark.parametrize("given,want", [("/root", WORKSPACE), ("", WORKSPACE), (None, WORKSPACE),
+                                        ("/workspace/proj", "/workspace/proj"), ("/tmp", "/tmp")])
+def test_create_environment_maps_the_hermes_default_cwd(sandbox_settings, given, want):
     env = KubernetesProvider().create_environment(cwd=given, timeout=60, task_id="t")
     assert env.cwd == want and env._initial_cwd == want
+
+
+def test_a_configured_terminal_cwd_disables_the_mapping(sandbox_settings, monkeypatch):
+    monkeypatch.setenv("TERMINAL_CWD", "/tmp")
+    assert hermes_default_cwd("kubernetes") is None  # Hermes plans /tmp: no default in play
+    env = KubernetesProvider().create_environment(cwd="/tmp", timeout=60, task_id="t")
+    assert env.cwd == "/tmp" and "cd -- /root" in env._wrap_command("pwd", "/root")
+
+
+def test_an_unusable_terminal_cwd_that_hermes_replaces_is_mapped(registered, sandbox_settings, monkeypatch):
+    monkeypatch.setenv("TERMINAL_CWD", "relative/dir")  # Hermes discards it for its (registered) container backend
+    assert hermes_default_cwd("kubernetes") == "/root"
+
+
+def test_the_profile_scope_decides(sandbox_settings, monkeypatch):
+    """Multiplexed: the routed profile's terminal policy, not the gateway process's environment."""
+    from tools.terminal_scope import reset_terminal_scope, set_terminal_scope
+    monkeypatch.setenv("TERMINAL_CWD", "/tmp")
+    token = set_terminal_scope({"TERMINAL_ENV": "kubernetes"})  # this profile has no terminal.cwd
+    try:
+        assert hermes_default_cwd("kubernetes") == "/root"
+    finally:
+        reset_terminal_scope(token)
+    assert hermes_default_cwd("kubernetes") is None
+
+
+def test_without_hermes_s_resolver_the_creation_cwd_is_the_default(sandbox_settings, no_hermes_resolver, caplog):
+    assert hermes_default_cwd("kubernetes", "/home/hermes") == "/home/hermes"
+    env = KubernetesProvider().create_environment(cwd="/home/hermes", timeout=60, task_id="t")
+    assert env.cwd == WORKSPACE
+    assert "cd -- /workspace" in env._wrap_command("pwd", "/home/hermes")  # per command: the same value
+    assert "cd -- /tmp" in env._wrap_command("pwd", "/tmp")
+    assert "not mapped" not in caplog.text
+
+
+def test_without_hermes_s_resolver_a_configured_cwd_is_not_guessed(sandbox_settings, no_hermes_resolver,
+                                                                   monkeypatch, caplog):
+    monkeypatch.setenv("TERMINAL_CWD", "/workspace")
+    for _ in range(3):
+        env = KubernetesProvider().create_environment(cwd="/root", timeout=60, task_id="t")
+        assert env.cwd == "/root" and "cd -- /root" in env._wrap_command("pwd", "/root")
+    assert caplog.text.count("not mapped") == 1  # logged once per profile
+
+
+def test_under_a_refusal_scope_nothing_is_mapped(sandbox_settings, caplog):
+    from tools import terminal_scope
+    token = terminal_scope.set_terminal_scope(terminal_scope.TerminalPolicyRefusal("unreadable"))
+    try:
+        assert hermes_default_cwd("kubernetes", "/root") is None
+        assert hermes_default_cwd("kubernetes", "/root") is None
+    finally:
+        terminal_scope.reset_terminal_scope(token)
+    assert caplog.text.count("not mapped") == 1
 
 
 def test_wrap_command_runs_the_hermes_default_cwd_in_the_initial_cwd():
     from kubernetes_sandbox.settings import Settings
     from kubernetes_sandbox.naming import Identity
-    e = envmod.KubernetesEnvironment(settings=Settings(docker=False), identity=Identity("p", "s"), cwd="/workspace",
-                                     timeout=30, client=FakeKube(), exec_connect=LocalExec())
-    assert "cd -- /workspace" in e._wrap_command("pwd", HERMES_DEFAULT_CWD)
-    assert "/root" not in e._wrap_command("pwd", HERMES_DEFAULT_CWD)
+
+    def env(default_cwd):
+        return envmod.KubernetesEnvironment(settings=Settings(docker=False), identity=Identity("p", "s"),
+                                            cwd="/workspace", timeout=30, default_cwd=default_cwd,
+                                            client=FakeKube(), exec_connect=LocalExec())
+    e = env("/root")
+    assert "cd -- /workspace" in e._wrap_command("pwd", "/root")
+    assert "/root" not in e._wrap_command("pwd", "/root")
     assert "cd -- /tmp/x" in e._wrap_command("pwd", "/tmp/x")  # any other cwd (a workdir, the session's) passes
     assert "cd -- /root/x" in e._wrap_command("pwd", "/root/x")
+    assert "cd -- /root" in env(None)._wrap_command("pwd", "/root")  # default unknown: nothing is mapped
 
 
 @pytest.fixture
@@ -119,12 +215,20 @@ def local_sandbox(tmp_path, _isolated_hermes_home, monkeypatch):
     return ws
 
 
-@pytest.mark.skipif(os.access("/root", os.X_OK), reason="needs a /root this user cannot enter, like the sandbox user")
-def test_terminal_tool_without_terminal_cwd_runs_in_the_workspace(registered, local_sandbox):
+@pytest.mark.parametrize("default", [None, "/home/hermes-nonexistent"])
+def test_terminal_tool_without_terminal_cwd_runs_in_the_workspace(registered, local_sandbox, hermes_default, default):
+    """Through Hermes's real terminal_tool and resolver; the second case is an upstream patch moving the default."""
     from tools import terminal_tool as tt
-    task = "probe-cwd-e2e"
+    if default is None:
+        if os.access("/root", os.X_OK):
+            pytest.skip("needs a /root this user cannot enter, like the sandbox user")
+    else:
+        hermes_default(default)
+    task = f"probe-cwd-e2e-{'moved' if default else 'v0.22'}"
     try:
-        assert tt._get_env_config()["cwd"] == HERMES_DEFAULT_CWD  # the precondition: Hermes plans /root
+        planned = tt._get_env_config()["cwd"]
+        assert planned == (default or "/root")  # the precondition: Hermes plans its default
+        assert not os.access(planned, os.X_OK)  # ... which this user cannot enter
         r = json.loads(tt.terminal_tool("pwd; echo marker > f.txt", task_id=task))
         assert r.get("exit_code") == 0, r
         assert r["output"].strip().splitlines()[0] == str(local_sandbox), r
@@ -133,5 +237,7 @@ def test_terminal_tool_without_terminal_cwd_runs_in_the_workspace(registered, lo
         assert r2.get("exit_code") == 0 and r2["output"].strip() == "/tmp", r2
     finally:
         from tools.terminal_tool_lifecycle import cleanup_vm
+        cleanup_vm(tt._resolve_container_task_id(task))  # the environment's key (here "default")
         cleanup_vm(task)
+        tt.clear_session_cwd(task)
         tt.clear_session_cwd("default")

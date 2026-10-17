@@ -7,9 +7,6 @@ import re
 
 # The work container's persistent volume (and workingDir); see podspec.py.
 WORKSPACE = "/workspace"
-# Hermes's cwd for every non-local backend without terminal.cwd (tools/terminal_tool.py
-# _DEFAULT_CWD_BY_BACKEND fallback, v0.22.1). The work container runs as UID 1000, which cannot enter it.
-HERMES_DEFAULT_CWD = "/root"
 PREFIX = "hermes-sandbox/"
 MANAGED_BY = {"app.kubernetes.io/managed-by": "hermes-kubernetes-sandbox"}
 ANN_SESSION_KEY = PREFIX + "session-key"

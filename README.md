@@ -44,11 +44,20 @@ hermes config set terminal.backend kubernetes
 hermes config set terminal.cwd /workspace
 ```
 
-**Set `terminal.cwd: /workspace`.** Without it Hermes runs every command of a non-local backend in
-`/root` (its built-in default for container and plugin backends), which the sandbox user (UID 1000)
-cannot enter. The plugin maps that literal `/root` to the environment's starting directory
-(`/workspace`), so commands still work, but a `terminal.cwd` keeps Hermes's own cwd planning, the
-session's recorded cwd and the system prompt pointing at the persistent workspace. `hermes doctor`
+**Set `terminal.cwd: /workspace`.** This is the fix. Without it Hermes runs every command of a
+non-local backend in its built-in default cwd (`/root` in v0.22.1, an inline fallback in
+`tools/terminal_tool.py` `_resolve_config_cwd`), which the sandbox user (UID 1000) cannot enter.
+A `terminal.cwd` keeps Hermes's own cwd planning, the session's recorded cwd and the system prompt
+pointing at the persistent workspace.
+
+As a backstop the plugin maps Hermes's default cwd to the environment's starting directory
+(`/workspace`), at creation and per command, so commands still work without it. It keeps no copy of
+that default: it asks Hermes's own resolver for this backend under the profile's terminal scope, so
+a Hermes patch that moves the default is followed with no plugin change. Without that resolver (a
+renamed function) and with `terminal.cwd` unset, the cwd Hermes passed at environment creation is
+taken as the default. Otherwise (a configured `terminal.cwd` it cannot check, or an unreadable
+terminal policy) it does not guess: nothing is mapped and a warning is logged once per profile.
+With a usable `terminal.cwd` configured nothing is mapped either; Hermes never plans its default then. `hermes doctor`
 reports a hard FAIL row when `terminal.cwd` is unset or outside `/workspace` (its API has no warning
 tier, although commands still work); the backend's requirements check only logs a warning, once per
 profile. An
@@ -382,8 +391,9 @@ fake, so replacing it with a library later stays contained.
 - The RBAC grants `watch` and `pods/log`, reserved for later use.
 - The system-prompt probe is answered without a Pod, so the prompt does not report the sandbox's
   kernel (under Kata it would be the guest's anyway).
-- A command whose explicit cwd is exactly `/root` runs in `/workspace` (Hermes's default cwd cannot
-  be told apart from a deliberate one; the sandbox user cannot enter `/root` either way).
+- Without `terminal.cwd`, a command whose explicit cwd is exactly Hermes's default (`/root`) runs in
+  `/workspace` (Hermes's default cwd cannot be told apart from a deliberate one; the sandbox user
+  cannot enter `/root` either way).
 - `docker_cli: init-copy` copies `cli-plugins/docker-*`; an image with an empty plugins
   directory fails the glob.
 - Creating a Pod can wait up to `ready_timeout_seconds` on the caller's thread and is not
