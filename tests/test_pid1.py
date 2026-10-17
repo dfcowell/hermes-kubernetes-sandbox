@@ -14,6 +14,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import time
 
 import pytest
@@ -162,20 +163,58 @@ def _wait_for(pred, seconds):
 _ORPHAN_PRELUDE = "( sleep 2 & sleep 1 ) &"
 
 
+def _cmdline(pid: int) -> list[str]:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return f.read().decode(errors="replace").split("\0")[:-1]
+    except (FileNotFoundError, ProcessLookupError):
+        return []
+
+
+def _orphans_started(ns) -> bool:
+    """The prelude's subshell and both its sleeps exist (a reaper adds its own sleep)."""
+    return len(ns.descendants()) >= 3
+
+
+def _only_own_sleep_left(ns) -> bool:
+    """All that is left is one live `sleep infinity`, PID 1's own direct child: the orphans have
+    finished AND been reaped (a zombie would still be listed)."""
+    left = ns.descendants()
+    if len(left) != 1:
+        return False
+    (pid, state), = left.items()
+    return state != "Z" and _stat(pid)[1] == ns.pid1 and _cmdline(pid) == ["sleep", "infinity"]
+
+
 @needs_pidns
 def test_reaper_pid1_reaps_adopted_orphans(namespace):
     ns = namespace(WORK_PID1, _ORPHAN_PRELUDE)
-    # Once both orphans have finished, a reaper leaves only its own `sleep infinity` (a zombie
-    # would still be listed, as in the control below).
-    assert _wait_for(lambda: len(ns.descendants()) == 1, 15), ns.descendants()
-    states = ns.descendants()
-    assert "Z" not in states.values(), states
+    # Wait for the orphans to exist first: before the prelude forks, its subshell can be PID 1's only
+    # descendant, and a bare "one descendant left" would pass without testing anything.
+    assert _wait_for(lambda: _orphans_started(ns), 10), ns.descendants()
+    assert _wait_for(lambda: _only_own_sleep_left(ns), 15), ns.descendants()
 
 
 @needs_pidns
 def test_sleep_pid1_leaves_zombies(namespace):  # negative control: the test can see the bug
     ns = namespace(SLEEP_PID1, _ORPHAN_PRELUDE)
+    assert _wait_for(lambda: _orphans_started(ns), 10), ns.descendants()
     assert _wait_for(lambda: list(ns.descendants().values()).count("Z") == 2, 15), ns.descendants()
+    assert not _only_own_sleep_left(ns)  # the reaper test's check fails here
+
+
+# Negative control shaped like the reaper: PID 1 keeps its own `sleep infinity` child but never
+# waits, so only reaping (not the process shape) can make the reaper test's check pass.
+_NON_REAPING_PID1 = [sys.executable, "-c",
+                     "import subprocess, time; subprocess.Popen(['sleep', 'infinity']); time.sleep(1e9)"]
+
+
+@needs_pidns
+def test_non_reaping_pid1_with_its_own_sleep_fails_the_reaper_check(namespace):
+    ns = namespace(_NON_REAPING_PID1, _ORPHAN_PRELUDE)
+    assert _wait_for(lambda: _orphans_started(ns), 10), ns.descendants()
+    assert _wait_for(lambda: list(ns.descendants().values()).count("Z") == 2, 15), ns.descendants()
+    assert not _wait_for(lambda: _only_own_sleep_left(ns), 2)
 
 
 @needs_pidns

@@ -331,20 +331,35 @@ def test_failed_pod_is_replaced():
 
 
 # The work container's PID 1 traps TERM, so a `kill 1` / `pkill bash` from inside the sandbox ends
-# it (exit 0; restartPolicy Never); an OOM kill ends it with 137. Without docker the Pod then goes
-# Succeeded/Failed; with docker the dind container keeps running, so the Pod stays phase Running
-# with Ready=False. Either way the next command replaces it.
+# it (exit 0; restartPolicy Never); an OOM kill ends it with 137. dind can die too (its OOM limit,
+# a dockerd crash). Without docker the Pod then goes Succeeded/Failed; with docker the surviving
+# container keeps the Pod phase Running with Ready=False. Either way the next command replaces it.
 _WORK_EXITS = {
     "kill-1": {"name": "work", "ready": False, "state": {"terminated": {"exitCode": 0, "reason": "Completed"}}},
     "oom": {"name": "work", "ready": False, "state": {"terminated": {"exitCode": 137, "reason": "OOMKilled"}}},
 }
 _DIND_RUNNING = {"name": "dind", "ready": True, "state": {"running": {}}}
+_WORK_RUNNING = {"name": "work", "ready": False, "state": {"running": {}}}  # readiness: `docker info` fails
+# Docker Pods whose phase stays Running after one container exited.
+_DOCKER_EXITS = {
+    "work-kill-1": [_DIND_RUNNING, _WORK_EXITS["kill-1"]],
+    "work-oom": [_DIND_RUNNING, _WORK_EXITS["oom"]],
+    "dind-oom": [{"name": "dind", "ready": False,
+                  "state": {"terminated": {"exitCode": 137, "reason": "OOMKilled"}}}, _WORK_RUNNING],
+    "dind-crash": [{"name": "dind", "ready": False,
+                    "state": {"terminated": {"exitCode": 1, "reason": "Error"}}}, _WORK_RUNNING],
+}
 
 
 def _fake_clock(e):
     now = [0.0]
     e._clock, e._sleep = (lambda: now[0]), (lambda secs: now.__setitem__(0, now[0] + secs))
     return now
+
+
+def _running_unready(statuses):
+    return {"phase": "Running", "conditions": [{"type": "Ready", "status": "False"}],
+            "containerStatuses": statuses}
 
 
 @pytest.mark.parametrize("why", sorted(_WORK_EXITS))
@@ -360,15 +375,13 @@ def test_work_exit_without_docker_is_recreated_on_the_next_command(why):
     assert kube.calls.count(("delete", ID.pod_name)) == 1 and kube.calls.count(("create", ID.pod_name)) == 2
 
 
-@pytest.mark.parametrize("why", sorted(_WORK_EXITS))
-def test_work_exit_with_docker_is_recreated_on_the_next_command(why):
+@pytest.mark.parametrize("why", sorted(_DOCKER_EXITS))
+def test_container_exit_with_docker_is_recreated_on_the_next_command(why):
     e, kube, _ = _env()
     assert S.docker
     now = _fake_clock(e)
     assert e.execute("echo hi")["returncode"] == 0
-    kube.pods[ID.pod_name]["status"] = {
-        "phase": "Running", "conditions": [{"type": "Ready", "status": "False"}],
-        "containerStatuses": [_DIND_RUNNING, _WORK_EXITS[why]]}
+    kube.pods[ID.pod_name]["status"] = _running_unready(_DOCKER_EXITS[why])
     kube._gets[ID.pod_name] = -10**9
     started = now[0]
     result = e.execute("echo hi")
@@ -377,21 +390,40 @@ def test_work_exit_with_docker_is_recreated_on_the_next_command(why):
     assert now[0] - started < S.ready_timeout_seconds  # replaced at once, not waited on
 
 
-def test_work_exit_while_waiting_for_ready_fails_fast_then_is_replaced():
+@pytest.mark.parametrize("why", sorted(_DOCKER_EXITS))
+def test_container_exit_found_by_a_restarted_gateway_is_replaced_at_once(why):
+    # A fresh gateway (nothing served in this process): the Pod is this session's own, so replacing
+    # it is a recreate through the session key alone.
+    kube = FakeKube()
+    kube.create_pod(render_pod(S, ID, now_iso="2026-01-01T00:00:00Z", created_by="old-gateway"))
+    kube.pods[ID.pod_name]["status"] = _running_unready(_DOCKER_EXITS[why])
+    kube._gets[ID.pod_name] = -10**9  # until it is replaced
+    kube.calls.clear()
+    assert not envmod._SERVED_PODS
+    e, _, _ = _env(kube=kube)
+    now = _fake_clock(e)
+    result = e.execute("echo hi")
+    assert result["returncode"] == 0 and result["environment_recreated"] is True
+    assert kube.calls.count(("delete", ID.pod_name)) == 1 and kube.calls.count(("create", ID.pod_name)) == 1
+    assert now[0] < S.ready_timeout_seconds
+
+
+@pytest.mark.parametrize("why", sorted(_DOCKER_EXITS))
+def test_container_exit_while_waiting_for_ready_fails_fast_then_is_replaced(why):
     e, kube, _ = _env()
     now = _fake_clock(e)
     real_create = kube.create_pod
 
-    def create_then_work_dies(manifest):
+    def create_then_a_container_dies(manifest):
         pod = real_create(manifest)
-        if kube.calls.count(("create", ID.pod_name)) == 1:  # only the first Pod's work exits
-            kube.pods[ID.pod_name]["status"] = {"phase": "Running",
-                                                "containerStatuses": [_DIND_RUNNING, _WORK_EXITS["oom"]]}
+        if kube.calls.count(("create", ID.pod_name)) == 1:  # only the first Pod's container exits
+            kube.pods[ID.pod_name]["status"] = _running_unready(_DOCKER_EXITS[why])
             kube._gets[ID.pod_name] = -10**9
         return pod
 
-    kube.create_pod = create_then_work_dies
-    with pytest.raises(EnvironmentConnectionError, match="work container exited") as ei:
+    kube.create_pod = create_then_a_container_dies
+    dead = why.split("-")[0]
+    with pytest.raises(EnvironmentConnectionError, match=f"container {dead} exited") as ei:
         e.execute("echo hi")
     assert now[0] < S.ready_timeout_seconds and "replaced" in ei.value.retry_hint
     result = e.execute("echo hi")
@@ -399,13 +431,14 @@ def test_work_exit_while_waiting_for_ready_fails_fast_then_is_replaced():
     assert kube.calls.count(("delete", ID.pod_name)) == 1 and kube.calls.count(("create", ID.pod_name)) == 2
 
 
-def test_capacity_still_counts_a_pod_whose_work_exited():
-    # It still holds dind's resources until it is replaced.
+@pytest.mark.parametrize("why", ["work-oom", "dind-oom"])
+def test_capacity_still_counts_a_pod_with_an_exited_container(why):
+    # It still holds the surviving container's resources until it is replaced.
     kube = FakeKube(ready_after=0)
     s = Settings(runtime_class_name="kata", docker_disk_storage_class="b", max_per_profile=1)
     other = Identity("mars", "other")
     kube.create_pod(render_pod(s, other, now_iso="x", created_by="x"))
-    kube.pods[other.pod_name]["status"] = {"phase": "Running", "containerStatuses": [_DIND_RUNNING, _WORK_EXITS["oom"]]}
+    kube.pods[other.pod_name]["status"] = _running_unready(_DOCKER_EXITS[why])
     e, _, _ = _env(kube=kube, settings=s)
     with pytest.raises(EnvironmentConnectionError, match="limit reached"):
         e.ensure_pod()
