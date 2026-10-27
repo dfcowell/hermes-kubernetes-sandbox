@@ -281,7 +281,10 @@ for a nullable key means "unset".
 | `workspace_storage_class` | unset (cluster default) | StorageClass of the workspace PVC: a filesystem class supporting `workspace_access_mode`. Env: `HERMES_K8S_WORKSPACE_STORAGE_CLASS`. |
 | `workspace_access_mode` | `ReadWriteOncePod` | Access mode of new workspace PVCs: `ReadWriteOncePod` (one Pod at a time; needs CSI `SINGLE_NODE_SINGLE_WRITER`) or `ReadWriteOnce` (one node; fallback for older drivers). See Storage requirements. Env: `HERMES_K8S_WORKSPACE_ACCESS_MODE`. |
 | `workspace_retention` | `7d` | How long a workspace may sit unmounted before the janitor deletes it: seconds, or `<n>s`/`m`/`h`/`d` (`36h`, `7d`); must be positive. Written to each new PVC. Env: `HERMES_K8S_WORKSPACE_RETENTION`. |
-| `work_cpu` / `work_memory` | `100m` / `512Mi` | `work` CPU request; memory request and limit. |
+| `work_cpu` / `work_memory` | `100m` / `512Mi` | `work` CPU request; memory limit (and the memory request unless `work_memory_request` is set). |
+| `work_memory_request` | unset (equals `work_memory`) | `work` memory request, when it should be below the limit (burstable); a whole-unit quantity (`1536Mi`), not above `work_memory`. |
+| `image_pull_secrets` | `[]` | Names of `kubernetes.io/dockerconfigjson` Secrets in the sandbox namespace, set as the Pod's `imagePullSecrets` (for a `work_image` on a private registry). From the environment: a JSON/YAML list, or names separated by commas or spaces. |
+| `config_configmap` / `config_mount_path` | unset / `/etc/hermes-sandbox/profile` | A ConfigMap mounted whole (every key a file) and read-only into `work` at `config_mount_path`, with or without `docker`; per-profile config for tools in the image. The path must be absolute and outside `/workspace`. |
 | `dind_cpu_request` / `dind_cpu_limit` / `dind_memory` | `500m` / `2` / `1Gi` | `dind` resources. |
 | `profile_configmap` | `hermes-sandbox-profile` | ConfigMap mounted into `/etc/profile.d` (puts the Docker CLI on PATH). |
 | `max_per_profile` | `2` | Live sandboxes per Hermes profile; beyond it a command fails with a retryable error. |

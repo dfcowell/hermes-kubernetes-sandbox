@@ -213,3 +213,59 @@ def test_plugin_labels_win_over_extra_labels():
                       extra_pod_labels={"hermes-sandbox/profile": "someone-else"})  # bypasses load_settings
     pod = render_pod(sneaky, Identity("mars", "sess-1"), now_iso="x", created_by="x")
     assert pod["metadata"]["labels"]["hermes-sandbox/profile"] == "mars"
+
+
+# --- work memory request, image pull secrets, profile config mount ---
+
+# template_hash(KATA) computed on the code before these settings existed: an upgrade that leaves them
+# unset must not replace existing Pods.
+KNOWN_HASH_BEFORE_CHANGE = "4c11eaf8"
+
+
+def _kata(**kw):
+    return Settings(runtime_class_name="kata", docker_disk_storage_class="block-ephemeral", **kw)
+
+
+def _work(pod):
+    return next(c for c in pod["containers"] if c["name"] == "work")
+
+
+def test_work_memory_request_defaults_to_limit():
+    w = _work(_spec(_kata(work_memory="3Gi"), "c"))
+    assert w["resources"] == {"requests": {"cpu": "100m", "memory": "3Gi"}, "limits": {"memory": "3Gi"}}
+
+
+def test_work_memory_request_separate():
+    w = _work(_spec(_kata(work_memory="3Gi", work_memory_request="1536Mi"), "c"))
+    assert w["resources"]["requests"]["memory"] == "1536Mi"
+    assert w["resources"]["limits"]["memory"] == "3Gi"
+
+
+def test_image_pull_secrets():
+    assert _spec(_kata(image_pull_secrets=("forgejo-pull",)), "c")["imagePullSecrets"] == [{"name": "forgejo-pull"}]
+    assert "imagePullSecrets" not in _spec(_kata(), "c")
+
+
+def test_config_configmap_mounted_whole_readonly():
+    for docker in (True, False):
+        pod = _spec(_kata(docker=docker, config_configmap="hermes-sandbox-pi-venus"), "c")
+        assert {"name": "profile-config", "configMap": {"name": "hermes-sandbox-pi-venus"}} in pod["volumes"]
+        m = [v for v in _work(pod)["volumeMounts"] if v["name"] == "profile-config"]
+        assert m == [{"name": "profile-config", "mountPath": "/etc/hermes-sandbox/profile", "readOnly": True}]
+
+
+def test_config_mount_path_is_configurable_and_absent_when_unset():
+    pod = _spec(_kata(config_configmap="cm", config_mount_path="/etc/pi"), "c")
+    assert {"name": "profile-config", "mountPath": "/etc/pi", "readOnly": True} in _work(pod)["volumeMounts"]
+    pod = _spec(_kata(), "c")
+    assert all(v["name"] != "profile-config" for v in pod["volumes"])
+    assert all(m["name"] != "profile-config" for m in _work(pod)["volumeMounts"])
+
+
+def test_template_hash_unchanged_when_new_settings_unset():
+    assert template_hash(KATA) == KNOWN_HASH_BEFORE_CHANGE
+
+
+def test_template_hash_covers_new_settings():
+    for kw in ({"work_memory_request": "256Mi"}, {"image_pull_secrets": ("p",)}, {"config_configmap": "c"}):
+        assert template_hash(_kata(**kw)) != template_hash(KATA), kw

@@ -84,6 +84,10 @@ class Settings:
     workspace_retention_seconds: int = 604800
     work_cpu: str = "100m"
     work_memory: str = "512Mi"
+    work_memory_request: str | None = None  # None: equal to work_memory (a Guaranteed-style request)
+    image_pull_secrets: tuple[str, ...] = ()
+    config_configmap: str | None = None  # mounted whole, read-only, at config_mount_path (both Pod shapes)
+    config_mount_path: str = "/etc/hermes-sandbox/profile"
     dind_cpu_request: str = "500m"
     dind_cpu_limit: str = "2"
     dind_memory: str = "1Gi"
@@ -112,6 +116,10 @@ _FALSE = {"0", "false", "no", "off"}
 _SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _LABEL_NAME = re.compile(r"[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?")
 _DNS_LABEL = re.compile(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?")
+_DNS_SUBDOMAIN = re.compile(rf"{_DNS_LABEL.pattern}(\.{_DNS_LABEL.pattern})*")
+_QUANTITY = re.compile(r"(\d+)(Ki|Mi|Gi|Ti|Pi|Ei|k|K|M|G|T|P|E)?")
+_QUANTITY_UNIT = {None: 1, "k": 10**3, "K": 10**3, "M": 10**6, "G": 10**9, "T": 10**12, "P": 10**15, "E": 10**18,
+                  "Ki": 2**10, "Mi": 2**20, "Gi": 2**30, "Ti": 2**40, "Pi": 2**50, "Ei": 2**60}
 _PLUGIN_LABELS = ("app.kubernetes.io/managed-by", "app.kubernetes.io/component")
 _PLUGIN_LABEL_PREFIX = "hermes-sandbox/"
 # Characters a git_credentials url may never contain: it lands in a git config key and an env value.
@@ -247,6 +255,33 @@ def _git_credentials(raw) -> tuple[GitCredential, ...]:
     return tuple(out)
 
 
+def _image_pull_secrets(raw) -> tuple[str, ...]:
+    if isinstance(raw, str) and not raw.strip().startswith("["):  # HERMES_K8S_IMAGE_PULL_SECRETS="a,b" or "a b"
+        raw = [x for x in re.split(r"[\s,]+", raw.strip()) if x]
+    raw = _yaml_text("image_pull_secrets", raw)
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise SettingsError("image_pull_secrets must be a list of Secret names")
+    for name in raw:
+        if not _is_dns_subdomain(name):
+            raise SettingsError(f"image_pull_secrets: {name!r} is not a valid Secret name (DNS-1123 subdomain)")
+    return tuple(dict.fromkeys(raw))
+
+
+def _is_dns_subdomain(name) -> bool:
+    return isinstance(name, str) and len(name) <= 253 and _DNS_SUBDOMAIN.fullmatch(name) is not None
+
+
+def _memory_bytes(key: str, value) -> int:
+    """A whole-number Kubernetes quantity (`512Mi`, `3Gi`, `1073741824`) in bytes."""
+    m = _QUANTITY.fullmatch(value) if isinstance(value, str) else None
+    if not m:
+        raise SettingsError(f"{key} must be a memory quantity of whole units such as 512Mi, 3Gi or 1073741824, "
+                            f"got {value!r}")
+    return int(m.group(1)) * _QUANTITY_UNIT[m.group(2)]
+
+
 def _duration(key: str, raw) -> int:
     """Seconds, from an int or `<n>s|m|h|d` ("7d"); bare digits are seconds."""
     if isinstance(raw, int) and not isinstance(raw, bool):
@@ -268,6 +303,8 @@ def _coerce(name: str, raw):
         return _forward_env(raw)
     if name == "git_credentials":
         return _git_credentials(raw)
+    if name == "image_pull_secrets":
+        return _image_pull_secrets(raw)
     if name == "workspace_retention_seconds":
         return _duration("workspace_retention", raw)
     if isinstance(raw, str):
@@ -300,6 +337,22 @@ def validate(s: Settings) -> Settings:
             raise SettingsError(f"{name} must be positive")
     if s.workspace_retention_seconds <= 0:
         raise SettingsError("workspace_retention must be positive")
+    if s.work_memory_request is not None:
+        request = _memory_bytes("work_memory_request", s.work_memory_request)
+        try:
+            limit = _memory_bytes("work_memory", s.work_memory)
+        except SettingsError:
+            limit = None  # an unusual work_memory spelling stays Kubernetes's to judge
+        if limit is not None and request > limit:
+            raise SettingsError(f"work_memory_request ({s.work_memory_request}) cannot exceed work_memory "
+                                f"({s.work_memory}): the request would be larger than the limit")
+    if s.config_configmap is not None and not _is_dns_subdomain(s.config_configmap):
+        raise SettingsError(f"config_configmap must be a ConfigMap name (DNS-1123 subdomain), got {s.config_configmap!r}")
+    path = s.config_mount_path
+    if (not isinstance(path, str) or not path.startswith("/") or path == "/" or re.search(r"\s", path)
+            or ".." in path.split("/") or path.rstrip("/") == "/workspace" or path.startswith("/workspace/")):
+        raise SettingsError("config_mount_path must be an absolute path other than / without spaces or '..' "
+                            f"segments, and outside /workspace, got {path!r}")
     for c in s.git_credentials:
         if c.password_env not in s.forward_env:
             raise SettingsError(f"git_credentials: password_env {c.password_env} for {c.url} must also be "

@@ -363,3 +363,88 @@ def test_git_credentials_url_rejected(_isolated_hermes_home, url):
 
 def test_forward_env_bare_scalar(_isolated_hermes_home):
     assert _load(_isolated_hermes_home, "forward_env: FOO\n").forward_env == ("FOO",)
+
+
+# --- work_memory_request, image_pull_secrets, config_configmap, config_mount_path ---
+
+def _load(home, text):
+    (home / "kubernetes-sandbox.yaml").write_text("docker: false\n" + text)
+    return load_settings(home)
+
+
+def test_new_settings_defaults(_isolated_hermes_home):
+    s = _load(_isolated_hermes_home, "")
+    assert s.work_memory_request is None and s.image_pull_secrets == () and s.config_configmap is None
+    assert s.config_mount_path == "/etc/hermes-sandbox/profile"
+
+
+def test_new_settings_parse(_isolated_hermes_home):
+    s = _load(_isolated_hermes_home, "work_memory: 3Gi\nwork_memory_request: 1536Mi\n"
+                                     "image_pull_secrets: [forgejo-pull, other.reg]\n"
+                                     "config_configmap: hermes-sandbox-pi-venus\nconfig_mount_path: /etc/pi\n")
+    assert (s.work_memory_request, s.image_pull_secrets) == ("1536Mi", ("forgejo-pull", "other.reg"))
+    assert (s.config_configmap, s.config_mount_path) == ("hermes-sandbox-pi-venus", "/etc/pi")
+
+
+def test_new_settings_from_env(_isolated_hermes_home, monkeypatch):
+    monkeypatch.setenv("HERMES_K8S_DOCKER", "false")
+    monkeypatch.setenv("HERMES_K8S_IMAGE_PULL_SECRETS", "a, b")
+    monkeypatch.setenv("HERMES_K8S_WORK_MEMORY_REQUEST", "256Mi")
+    s = load_settings(_isolated_hermes_home)
+    assert s.image_pull_secrets == ("a", "b") and s.work_memory_request == "256Mi"
+
+
+def test_work_memory_request_above_limit_rejected(_isolated_hermes_home):
+    with pytest.raises(SettingsError, match="work_memory_request"):
+        _load(_isolated_hermes_home, "work_memory: 1Gi\nwork_memory_request: 2Gi\n")
+
+
+def test_work_memory_request_equal_or_below_limit_accepted(_isolated_hermes_home):
+    assert _load(_isolated_hermes_home, "work_memory: 1Gi\nwork_memory_request: 1024Mi\n").work_memory_request
+    assert _load(_isolated_hermes_home, "work_memory: 1Gi\nwork_memory_request: 512Mi\n").work_memory_request
+
+
+@pytest.mark.parametrize("value", ["lots", "1.5.Gi", "-1Gi", "[1]", "{a: b}", "true", "5Gb"])
+def test_work_memory_request_must_be_a_quantity(_isolated_hermes_home, value):
+    with pytest.raises(SettingsError, match="work_memory_request"):
+        _load(_isolated_hermes_home, f"work_memory_request: {value}\n")
+
+
+@pytest.mark.parametrize("text", ["image_pull_secrets: 5\n", "image_pull_secrets: {a: b}\n",
+                                  "image_pull_secrets: [Bad_Name]\n", "image_pull_secrets: [-x]\n",
+                                  "image_pull_secrets: [5]\n", "image_pull_secrets: [a, a.]\n"])
+def test_image_pull_secrets_invalid(_isolated_hermes_home, text):
+    with pytest.raises(SettingsError, match="image_pull_secrets"):
+        _load(_isolated_hermes_home, text)
+
+
+def test_image_pull_secrets_duplicates_collapse(_isolated_hermes_home):
+    assert _load(_isolated_hermes_home, "image_pull_secrets: [a, a]\n").image_pull_secrets == ("a",)
+
+
+@pytest.mark.parametrize("value", ["Not_DNS", "5", "[x]", "a/b"])
+def test_config_configmap_invalid(_isolated_hermes_home, value):
+    with pytest.raises(SettingsError, match="config_configmap"):
+        _load(_isolated_hermes_home, f"config_configmap: {value}\n")
+
+
+def test_config_configmap_empty_env_is_unset(_isolated_hermes_home, monkeypatch):
+    monkeypatch.setenv("HERMES_K8S_DOCKER", "false")
+    monkeypatch.setenv("HERMES_K8S_CONFIG_CONFIGMAP", "")
+    assert load_settings(_isolated_hermes_home).config_configmap is None
+
+
+@pytest.mark.parametrize("value", ["relative/path", "/", "/workspace", "/workspace/pi", "/a/../workspace", "/a/..",
+                                   "5", "[x]", "/a b"])
+def test_config_mount_path_invalid(_isolated_hermes_home, value):
+    with pytest.raises(SettingsError, match="config_mount_path"):
+        _load(_isolated_hermes_home, f'config_mount_path: "{value}"\n' if value[0] not in "[5" else
+              f"config_mount_path: {value}\n")
+
+
+def test_config_mount_path_workspace_lookalike_is_fine(_isolated_hermes_home):
+    assert _load(_isolated_hermes_home, "config_mount_path: /workspaces/pi\n").config_mount_path == "/workspaces/pi"
+
+
+def test_image_pull_secrets_bare_string_is_one_name_like_forward_env(_isolated_hermes_home):
+    assert _load(_isolated_hermes_home, "image_pull_secrets: forgejo-pull\n").image_pull_secrets == ("forgejo-pull",)
