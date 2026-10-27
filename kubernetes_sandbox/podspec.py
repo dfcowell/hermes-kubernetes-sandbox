@@ -34,7 +34,7 @@ def _spec(s: Settings, claim: str) -> dict:
         "securityContext": copy.deepcopy(_WORK_SC),
         "env": [], "volumeMounts": [{"name": "workspace", "mountPath": "/workspace"}],
         "workingDir": "/workspace",
-        "resources": {"requests": {"cpu": s.work_cpu, "memory": s.work_memory},
+        "resources": {"requests": {"cpu": s.work_cpu, "memory": s.work_memory_request or s.work_memory},
                       "limits": {"memory": s.work_memory}},
     }
     spec: dict = {
@@ -46,6 +46,11 @@ def _spec(s: Settings, claim: str) -> dict:
     }
     if s.runtime_class_name:
         spec["runtimeClassName"] = s.runtime_class_name
+    if s.image_pull_secrets:
+        spec["imagePullSecrets"] = [{"name": n} for n in s.image_pull_secrets]
+    if s.config_configmap:  # the whole ConfigMap as a directory (no subPath: updates and Kata both behave)
+        spec["volumes"].append({"name": "profile-config", "configMap": {"name": s.config_configmap}})
+        work["volumeMounts"].append({"name": "profile-config", "mountPath": s.config_mount_path, "readOnly": True})
     if not s.docker:
         return spec
 
