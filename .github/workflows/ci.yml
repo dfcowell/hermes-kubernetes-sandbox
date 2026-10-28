@@ -3,6 +3,15 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every Hermes release the lab runs: v0.22.1 (prod until its bump) and v0.22.5 (dev since 2026-10-28). Drop a
+        # row once no environment runs it.
+        hermes:
+          - { tag: v0.22.1, commit: 297552a9d646119871391d202509822cd86330df }
+          - { tag: v0.22.5, commit: bf0203a794a07aac3ff764972ab9087baa4e4f4e }
+    name: test (Hermes ${{ matrix.hermes.tag }})
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -11,9 +20,13 @@ jobs:
       - name: Clone Hermes at the pinned commit
         run: |
           git clone --filter=blob:none https://github.com/NousResearch/hermes-agent.git .hermes-src
-          git -C .hermes-src checkout --quiet 297552a9d646119871391d202509822cd86330df
-      - name: Install Hermes (editable) and test tools
-        run: uv pip install --python .venv -e .hermes-src pytest==9.1.1 ruff==0.15.10
+          git -C .hermes-src checkout --quiet ${{ matrix.hermes.commit }}
+      # From Hermes's own uv.lock (as its image does): v0.22.5's pins only resolve with the lock's
+      # override-dependencies, which `uv pip install -e` ignores.
+      - name: Install Hermes (editable, from its lockfile) and test tools
+        run: |
+          UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv sync --frozen --project .hermes-src --python 3.14
+          uv pip install --python .venv pytest==9.1.1 ruff==0.15.10
       - name: Lint
         run: .venv/bin/ruff check .
       - name: Allow unprivileged user namespaces (the PID-1 tests run in `unshare -rpf`; they skip without)
