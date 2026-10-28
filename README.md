@@ -344,6 +344,10 @@ replaces it on its next command, or until the Pod is deleted.
   from `janitor/janitor.py`.
 - `scripts/e2e.py <settings.yaml>` — live end-to-end check against a real cluster (never run in
   CI). From the repo root: `.venv/bin/python scripts/e2e.py my-settings.yaml`.
+- `scripts/exec-tls-stress.py [--client sansio|sync]` — opens exec websockets from 64 threads
+  against a local TLS 1.3 server, as Hermes does while it polls a background process. `sansio` (the
+  plugin's client) must exit 0; `sync` (websockets' sync client) segfaults within about a minute.
+  Run it in the Hermes image to test the Python/OpenSSL pair Hermes ships.
 
 ## Why no Kubernetes client library?
 
@@ -362,6 +366,11 @@ rather than a dependency on the official `kubernetes` package or another client 
   frame carries the exit code, and stdin is deliberately never closed (see Known limits). That is
   simpler to guarantee on a raw `v5.channel.k8s.io` websocket than through a library's stream
   wrapper.
+- **One thread per connection.** The exec client drives websockets' Sans-I/O protocol and does every
+  socket read and write on the thread that runs the command. websockets' sync client reads on a
+  background thread while the caller writes; OpenSSL forbids using one connection from two threads
+  and CPython does not serialise them (gh-143756), so under TLS 1.3 that crashed the Hermes gateway
+  with SIGSEGV. `scripts/exec-tls-stress.py` reproduces it.
 
 The trade-off: authentication is a bearer token plus a CA bundle only. Kubeconfig exec plugins,
 OIDC refresh and client certificates are not supported; out-of-cluster gateways use a minted
