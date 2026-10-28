@@ -466,8 +466,31 @@ class KubernetesEnvironment(BaseEnvironment):
         except _API_ERRORS:
             pass
 
+    def _mark_hermes_activity(self) -> None:
+        """Mark this env active in Hermes's idle reaper (`_cleanup_inactive_envs`), on every execute.
+
+        Interim workaround, remove once Hermes fixes it: the reaper keeps an env with a running background
+        process alive only when `process_registry.has_active_processes(<env key>)` is true, and that compares
+        the process's RAW owner task id. A multiplexed gateway keys a routed profile's env
+        `profile:<name>:<key>`, so the check never matches and the sandbox is torn down `TERMINAL_LIFETIME_SECONDS`
+        after the last foreground command while e.g. a background coding agent is mid-task (Hermes v0.22.1 and
+        v0.22.5; homelab 2026-10-28). Hermes's background-process poller executes in the env every ~2 s while
+        the process runs, so refreshing here keeps exactly those envs. Only an env Hermes still tracks is
+        touched (found by identity, never inserted); missing internals make this a no-op."""
+        try:
+            from tools import terminal_tool as tt
+            lock, envs, activity = tt._env_lock, tt._active_environments, tt._last_activity
+        except (ImportError, AttributeError):
+            return
+        now = time.time()  # Hermes's own clock for _last_activity
+        with lock:
+            for key, env in list(envs.items()):
+                if env is self:
+                    activity[key] = now
+
     # --- BaseEnvironment ------------------------------------------------------
     def _before_execute(self) -> None:
+        self._mark_hermes_activity()
         if self._pod_ready:
             self._check_alive()
         if not self._pod_ready:

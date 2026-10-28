@@ -379,6 +379,16 @@ fake, so replacing it with a library later stays contained.
 
 ## Known limits
 
+- **Hermes's idle reaper ignores background processes under a multiplexed gateway (worked around).**
+  Hermes keeps an environment with a running background process alive only when
+  `has_active_processes(<env key>)` is true, which compares the process's raw owner task id; a
+  multiplexed gateway keys a routed profile's environment `profile:<name>:<key>`, so the check never
+  matches and the sandbox is deleted `TERMINAL_LIFETIME_SECONDS` after the last foreground command,
+  killing e.g. a background coding agent mid-task (Hermes v0.22.1 through at least v0.22.5). The
+  plugin marks its environment active in Hermes's reaper on every execute
+  (`_mark_hermes_activity`); Hermes's background-process poller executes every ~2 s while the
+  process runs, so exactly those environments stay. Remove it once Hermes matches the container key
+  (`ProcessSession.task_id`) in `_cleanup_inactive_envs`.
 - **The exec's stdin is never closed.** On Kata 3.28 / containerd 2.2.3 / Kubernetes 1.36.5 an
   exec whose stdin has been closed loses all output written after the close (it reproduces with
   `kubectl exec -i`). So the runner receives the script and the caller's stdin length-prefixed on

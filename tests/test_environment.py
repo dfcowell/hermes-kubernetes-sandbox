@@ -1346,3 +1346,92 @@ def test_explicit_withheld_name_is_resolved_but_never_emitted(monkeypatch, caplo
     assert seen["fwd"] == ["OPENAI_API_KEY"] and seen["out"][0] == {"OPENAI_API_KEY": "sk-resolved-not-sent"}
     assert "sk-resolved-not-sent" not in script and "OPENAI_API_KEY" not in script
     assert "sk-resolved-not-sent" not in caplog.text
+
+
+# --- keepalive for Hermes's idle reaper (interim, see KubernetesEnvironment._mark_hermes_activity) -----------
+
+@pytest.fixture
+def hermes_registered():
+    """Register an env in Hermes's own tables under the key a MULTIPLEXED gateway gives a routed profile
+    (_qualify_task_key: "profile:<name>:<key>"), its last activity 31.7 min ago; removed afterwards."""
+    import time
+    from tools import terminal_tool as tt
+    keys = []
+
+    def register(env, key="profile:mars:sess-1", age=1900.0):
+        with tt._env_lock:
+            tt._active_environments[key] = env
+            tt._last_activity[key] = time.time() - age
+        keys.append(key)
+        return key
+    yield register
+    with tt._env_lock:
+        for k in keys:
+            tt._active_environments.pop(k, None)
+            tt._last_activity.pop(k, None)
+
+
+def test_execute_marks_hermes_idle_clock(hermes_registered):
+    import time
+    from tools import terminal_tool as tt
+    e, _, _ = _env()
+    key = hermes_registered(e)
+    e.execute("echo hi")
+    assert time.time() - tt._last_activity[key] < 5
+
+
+def test_keepalive_leaves_envs_hermes_no_longer_tracks(hermes_registered):
+    from tools import terminal_tool as tt
+    e, _, _ = _env()
+    other, _, _ = _env(ident=Identity("mars", "sess-2"))
+    key = hermes_registered(other)
+    before = dict(tt._last_activity)
+    e.execute("echo hi")  # e is in no Hermes table (torn down, or never registered): nothing is (re)inserted
+    assert tt._last_activity == before and tt._last_activity[key] == before[key]
+
+
+def test_keepalive_tolerates_missing_hermes_internals(monkeypatch):
+    from tools import terminal_tool as tt
+    monkeypatch.delattr(tt, "_last_activity")
+    e, _, _ = _env()
+    assert e.execute("echo hi")["returncode"] == 0
+
+
+def test_running_background_process_survives_hermes_idle_reaper(hermes_registered, monkeypatch):
+    """The production failure (2026-10-28): Hermes's reaper keeps an env alive only when has_active_processes()
+    matches its key, which compares the RAW owner task id, so under a multiplexed gateway a running background
+    process never counts and the sandbox is torn down mid-task. Hermes's poller executes in the env every ~2 s
+    while the process runs; that execute must keep the env out of the reaper."""
+    import time
+    from tools import terminal_tool_lifecycle as lc
+    from tools.process_registry import ProcessSession, process_registry
+    e, _, _ = _env()
+    key = hermes_registered(e)
+    sess = ProcessSession(id="proc_keepalive", command="pi -p ...", task_id=key, owner_task_id="sess-1",
+                          started_at=time.time() - 1900, env_ref=e)
+    with process_registry._lock:
+        process_registry._running[sess.id] = sess
+    torn = []
+    monkeypatch.setattr(lc, "_teardown_env", lambda env, k, **kw: torn.append(k))
+    monkeypatch.setattr(lc, "_clear_file_ops_cache", lambda k: None)
+    monkeypatch.setattr(process_registry, "_refresh_detached_session", lambda s: None)
+    try:
+        assert process_registry.has_active_processes(key) is False  # the Hermes bug this works around
+        e.execute("kill -0 $pid")  # what the poller runs
+        lc._cleanup_inactive_envs(lifetime_seconds=1800)
+        assert torn == []
+    finally:
+        with process_registry._lock:
+            process_registry._running.pop(sess.id, None)
+
+
+def test_without_keepalive_the_reaper_tears_down(hermes_registered, monkeypatch):
+    """Control for the test above: with the same tables but no execute, the reaper tears the env down."""
+    from tools import terminal_tool_lifecycle as lc
+    e, _, _ = _env()
+    key = hermes_registered(e)
+    torn = []
+    monkeypatch.setattr(lc, "_teardown_env", lambda env, k, **kw: torn.append(k))
+    monkeypatch.setattr(lc, "_clear_file_ops_cache", lambda k: None)
+    lc._cleanup_inactive_envs(lifetime_seconds=1800)
+    assert torn == [key]
