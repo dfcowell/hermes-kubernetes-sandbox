@@ -46,7 +46,8 @@ server but has not been live-tested.
 ## Install
 
 The plugin uses only libraries Hermes already ships (httpx, websockets, and a YAML loader).
-Tested against Hermes v0.22.1 (pinned in CI). On Hermes v0.22+ the plugin parses settings with
+Tested against every Hermes release the lab runs — v0.22.1 and v0.22.5, each pinned in a CI matrix
+row. On Hermes v0.22+ the plugin parses settings with
 Hermes's internal `hermes_yaml` module (not a stable plugin API; a rename is caught by the
 registration test at the next pin bump); on older Hermes, PyYAML.
 
@@ -333,9 +334,13 @@ replaces it on its next command, or until the Pod is deleted.
 
     uv venv -p 3.14 .venv
     git clone --filter=blob:none https://github.com/NousResearch/hermes-agent.git .hermes-src
-    git -C .hermes-src checkout --quiet 297552a9d646119871391d202509822cd86330df
-    uv pip install --python .venv -e .hermes-src pytest==9.1.1 ruff==0.15.10
+    git -C .hermes-src checkout --quiet 297552a9d646119871391d202509822cd86330df  # v0.22.1; CI also runs v0.22.5
+    UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv sync --frozen --project .hermes-src --python 3.14
+    uv pip install --python .venv pytest==9.1.1 ruff==0.15.10
     .venv/bin/ruff check . && .venv/bin/pytest
+
+Install Hermes from its own `uv.lock` (`uv sync --frozen`, as its image does): v0.22.5's pins only
+resolve with the lock's override-dependencies, which `uv pip install -e` ignores.
 
 - `scripts/validate-examples.sh` — server-side dry run of every example manifest against the
   current kube context. Read-only: it prints the context first and fails if a namespace is
