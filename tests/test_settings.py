@@ -283,14 +283,14 @@ def test_trailing_newline_rejected(_isolated_hermes_home, text, why):
 @pytest.mark.parametrize("name", ["LD_PRELOAD", "LD_LIBRARY_PATH", "BASH_ENV", "ENV", "PATH", "IFS", "SHELLOPTS",
                                   "BASHOPTS", "PS4", "PROMPT_COMMAND", "PYTHONPATH", "PYTHONSTARTUP",
                                   "PYTHONHOME", "KUBERNETES_SERVICE_HOST", "HERMES_HOME", "HERMES_K8S_API_URL",
-                                  # the runner's own variables (R-H18)
+                                  # the runner's own variables
                                   "__hs_env", "__hs_anything",
-                                  # bash readonly/special names: assigning one fails the runner's eval (R-H18)
+                                  # bash readonly/special names: assigning one fails the runner's eval
                                   "UID", "EUID", "PPID", "BASHPID", "BASH_VERSINFO", "GROUPS", "BASH_ARGV0",
                                   "BASH_SUBSHELL", "POSIXLY_CORRECT",
-                                  # LiteLLM proxy keys, which Hermes does not classify (R-H20)
+                                  # LiteLLM proxy keys, which Hermes does not classify
                                   "LITELLM_API_KEY", "LITELLM_MASTER_KEY",
-                                  # Hindsight memory keys, which Hermes does not classify (R-H21)
+                                  # Hindsight memory keys, which Hermes does not classify
                                   "HINDSIGHT_API_TENANT_API_KEY", "HINDSIGHT_API_KEY"])
 def test_denied_env_names(_isolated_hermes_home, name):
     with pytest.raises(SettingsError, match=f"forward_env: {name} cannot be forwarded"):
@@ -381,9 +381,9 @@ def test_new_settings_defaults(_isolated_hermes_home):
 def test_new_settings_parse(_isolated_hermes_home):
     s = _load(_isolated_hermes_home, "work_memory: 3Gi\nwork_memory_request: 1536Mi\n"
                                      "image_pull_secrets: [forgejo-pull, other.reg]\n"
-                                     "config_configmap: hermes-sandbox-pi-venus\nconfig_mount_path: /etc/pi\n")
+                                     "config_configmap: hermes-sandbox-pi-bob\nconfig_mount_path: /etc/pi\n")
     assert (s.work_memory_request, s.image_pull_secrets) == ("1536Mi", ("forgejo-pull", "other.reg"))
-    assert (s.config_configmap, s.config_mount_path) == ("hermes-sandbox-pi-venus", "/etc/pi")
+    assert (s.config_configmap, s.config_mount_path) == ("hermes-sandbox-pi-bob", "/etc/pi")
 
 
 def test_new_settings_from_env(_isolated_hermes_home, monkeypatch):

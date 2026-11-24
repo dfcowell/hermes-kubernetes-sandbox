@@ -88,7 +88,7 @@ def test_approvals_stay_on_with_forwarded_credentials(_isolated_hermes_home):
            "git_credentials: [{url: https://f.example.com, username: u, password_env: FORGE_TOKEN}]\n")
     p = KubernetesProvider()
     p._settings()  # the credential settings load
-    assert p.skip_container_guards is False  # K12: approvals stay on (amendment §2.6 item 4)
+    assert p.skip_container_guards is False  # approvals stay on
 
 
 def _ready_settings(home, tmp_path):

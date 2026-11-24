@@ -5,10 +5,10 @@ DNS1123 = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 
 
 def test_pod_name_is_dns1123_deterministic_and_bounded():
-    ident = Identity(profile="Mars_Lab.Profile", session_key="telegram:123/thread:9")
-    assert ident.pod_name == Identity("Mars_Lab.Profile", "telegram:123/thread:9").pod_name
+    ident = Identity(profile="Alice_Dev.Profile", session_key="telegram:123/thread:9")
+    assert ident.pod_name == Identity("Alice_Dev.Profile", "telegram:123/thread:9").pod_name
     assert DNS1123.match(ident.pod_name) and len(ident.pod_name) <= 63
-    assert ident.pod_name.startswith("hs-mars-lab-profile-")
+    assert ident.pod_name.startswith("hs-alice-dev-profile-")
 
 
 def test_different_sessions_differ_and_profile_is_part_of_hash():

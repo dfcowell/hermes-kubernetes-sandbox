@@ -9,7 +9,7 @@ KATA = Settings(runtime_class_name="kata", docker_disk_storage_class="block-ephe
 
 
 def _pod(s=KATA):
-    return render_pod(s, Identity("mars", "sess-1"), now_iso="2026-10-09T00:00:00Z", created_by="gw-0")
+    return render_pod(s, Identity("alice", "sess-1"), now_iso="2026-10-09T00:00:00Z", created_by="gw-0")
 
 
 def _containers(pod):
@@ -19,8 +19,8 @@ def _containers(pod):
 def test_identity_metadata_and_runtime():
     pod = _pod()
     md = pod["metadata"]
-    assert md["name"] == Identity("mars", "sess-1").pod_name
-    assert md["labels"]["hermes-sandbox/profile"] == "mars"
+    assert md["name"] == Identity("alice", "sess-1").pod_name
+    assert md["labels"]["hermes-sandbox/profile"] == "alice"
     assert md["labels"]["hermes-sandbox/template-hash"] == template_hash(KATA)
     assert md["annotations"]["hermes-sandbox/session-key"] == "sess-1"
     assert pod["spec"]["runtimeClassName"] == "kata"
@@ -132,7 +132,7 @@ def test_workspace_is_the_session_pvc_with_fsgroup_change_policy():
         pod = _pod(s)
         vols = {v["name"]: v for v in pod["spec"]["volumes"]}
         assert vols["workspace"] == {"name": "workspace", "persistentVolumeClaim": {
-            "claimName": Identity("mars", "sess-1").workspace_claim}}
+            "claimName": Identity("alice", "sess-1").workspace_claim}}
         assert pod["spec"]["securityContext"]["fsGroup"] == 1000
         assert pod["spec"]["securityContext"]["fsGroupChangePolicy"] == "OnRootMismatch"
         assert {"name": "workspace", "mountPath": "/workspace"} in _containers(pod)["work"]["volumeMounts"]
@@ -151,7 +151,7 @@ def test_pod_is_labelled_component_sandbox():
 
 def test_workspace_claim_manifest():
     from kubernetes_sandbox.podspec import render_workspace_claim
-    ident = Identity("mars", "sess-1")
+    ident = Identity("alice", "sess-1")
     s = Settings(docker=False, workspace_size="20Gi", workspace_retention_seconds=3600,
                  workspace_storage_class="fast-fs")
     pvc = render_workspace_claim(s, ident)
@@ -170,7 +170,7 @@ def test_workspace_claim_manifest():
 
 def test_workspace_claim_omits_storage_class_for_cluster_default():
     from kubernetes_sandbox.podspec import render_workspace_claim
-    pvc = render_workspace_claim(Settings(docker=False), Identity("mars", "sess-1"))
+    pvc = render_workspace_claim(Settings(docker=False), Identity("alice", "sess-1"))
     assert "storageClassName" not in pvc["spec"]
     assert pvc["spec"]["resources"]["requests"]["storage"] == "10Gi"
     assert pvc["metadata"]["annotations"]["hermes-sandbox/workspace-retention-seconds"] == "604800"
@@ -178,7 +178,7 @@ def test_workspace_claim_omits_storage_class_for_cluster_default():
 
 def test_workspace_claim_access_mode_follows_the_setting():
     from kubernetes_sandbox.podspec import render_workspace_claim
-    ident = Identity("mars", "sess-1")
+    ident = Identity("alice", "sess-1")
     assert render_workspace_claim(Settings(docker=False), ident)["spec"]["accessModes"] == ["ReadWriteOncePod"]
     rwo = Settings(docker=False, workspace_access_mode="ReadWriteOnce")
     assert render_workspace_claim(rwo, ident)["spec"]["accessModes"] == ["ReadWriteOnce"]
@@ -189,7 +189,7 @@ LABELLED = Settings(runtime_class_name="kata", docker_disk_storage_class="block-
 
 
 def test_extra_labels_on_the_pod_not_on_the_workspace():
-    ident = Identity("mars", "sess-1")
+    ident = Identity("alice", "sess-1")
     pod = render_pod(LABELLED, ident, now_iso="x", created_by="x")
     assert pod["metadata"]["labels"]["example.com/forge-egress"] == "true"
     assert "example.com/forge-egress" not in render_workspace_claim(LABELLED, ident)["metadata"]["labels"]
@@ -211,8 +211,8 @@ def test_template_hash_covers_extra_labels():
 def test_plugin_labels_win_over_extra_labels():
     sneaky = Settings(runtime_class_name="kata", docker_disk_storage_class="block-ephemeral",
                       extra_pod_labels={"hermes-sandbox/profile": "someone-else"})  # bypasses load_settings
-    pod = render_pod(sneaky, Identity("mars", "sess-1"), now_iso="x", created_by="x")
-    assert pod["metadata"]["labels"]["hermes-sandbox/profile"] == "mars"
+    pod = render_pod(sneaky, Identity("alice", "sess-1"), now_iso="x", created_by="x")
+    assert pod["metadata"]["labels"]["hermes-sandbox/profile"] == "alice"
 
 
 # --- work memory request, image pull secrets, profile config mount ---
@@ -248,8 +248,8 @@ def test_image_pull_secrets():
 
 def test_config_configmap_mounted_whole_readonly():
     for docker in (True, False):
-        pod = _spec(_kata(docker=docker, config_configmap="hermes-sandbox-pi-venus"), "c")
-        assert {"name": "profile-config", "configMap": {"name": "hermes-sandbox-pi-venus"}} in pod["volumes"]
+        pod = _spec(_kata(docker=docker, config_configmap="hermes-sandbox-pi-bob"), "c")
+        assert {"name": "profile-config", "configMap": {"name": "hermes-sandbox-pi-bob"}} in pod["volumes"]
         m = [v for v in _work(pod)["volumeMounts"] if v["name"] == "profile-config"]
         assert m == [{"name": "profile-config", "mountPath": "/etc/hermes-sandbox/profile", "readOnly": True}]
 

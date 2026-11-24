@@ -46,8 +46,8 @@ server but has not been live-tested.
 ## Install
 
 The plugin uses only libraries Hermes already ships (httpx, websockets, and a YAML loader).
-Tested against every Hermes release the lab runs — v0.22.1 and v0.22.5, each pinned in a CI matrix
-row. On Hermes v0.22+ the plugin parses settings with
+Tested against every supported Hermes release — v0.22.1, v0.22.5, v0.23.1 and v0.23.3, each pinned in a
+CI matrix row. On Hermes v0.22+ the plugin parses settings with
 Hermes's internal `hermes_yaml` module (not a stable plugin API; a rename is caught by the
 registration test at the next pin bump); on older Hermes, PyYAML.
 
@@ -334,7 +334,7 @@ replaces it on its next command, or until the Pod is deleted.
 
     uv venv -p 3.14 .venv
     git clone --filter=blob:none https://github.com/NousResearch/hermes-agent.git .hermes-src
-    git -C .hermes-src checkout --quiet 297552a9d646119871391d202509822cd86330df  # v0.22.1; CI also runs v0.22.5
+    git -C .hermes-src checkout --quiet caafe5389ae585ef77387a962aee05b1bcf17029  # v0.23.3; CI also runs v0.22.1, v0.22.5, v0.23.1
     UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv sync --frozen --project .hermes-src --python 3.14
     uv pip install --python .venv pytest==9.1.1 ruff==0.15.10
     .venv/bin/ruff check . && .venv/bin/pytest

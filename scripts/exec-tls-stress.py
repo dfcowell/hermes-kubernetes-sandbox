@@ -6,7 +6,7 @@ process under Hermes's 2 s poller).
     scripts/exec-tls-stress.py --client sansio   # the plugin's connect_exec: expect exit 0
     scripts/exec-tls-stress.py --client sync     # websockets' sync client: SIGSEGV (exit -11/139) in ~10-80 s
 
-`sync` reproduces the Hermes gateway crash of 2026-10 (CPython gh-143756: the sync client reads on a
+`sync` reproduces the Hermes gateway crash (CPython gh-143756: the sync client reads on a
 background thread while the caller writes the upgrade request, and the TLS 1.3 session tickets that arrive
 right after the TLS handshake are processed concurrently with that write). Run it in the image that runs
 Hermes to test the exact Python/OpenSSL pair. Needs the openssl CLI; makes no network calls beyond 127.0.0.1.

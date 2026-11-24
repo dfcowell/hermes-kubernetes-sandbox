@@ -182,7 +182,7 @@ class KubernetesEnvironment(BaseEnvironment):
         self._had_pod = False
         self._pod_uid: str | None = None
         self._bootstrap_attempted = False
-        # Names whose values are forwarded per exec (K11). Monotonic: a name stays excluded from the session
+        # Names whose values are forwarded per exec. Monotonic: a name stays excluded from the session
         # snapshot after its value is gone, so an old value cannot persist there.
         self._exec_env_names: set[str] = set(settings.forward_env) | credential_names(settings.git_credentials)
 
@@ -474,7 +474,7 @@ class KubernetesEnvironment(BaseEnvironment):
         the process's RAW owner task id. A multiplexed gateway keys a routed profile's env
         `profile:<name>:<key>`, so the check never matches and the sandbox is torn down `TERMINAL_LIFETIME_SECONDS`
         after the last foreground command while e.g. a background coding agent is mid-task (Hermes v0.22.1 and
-        v0.22.5; homelab 2026-10-28). Hermes's background-process poller executes in the env every ~2 s while
+        v0.22.5). Hermes's background-process poller executes in the env every ~2 s while
         the process runs, so refreshing here keeps exactly those envs. Only an env Hermes still tracks is
         touched (found by identity, never inserted); missing internals make this a no-op."""
         try:
@@ -500,14 +500,16 @@ class KubernetesEnvironment(BaseEnvironment):
             self.init_session()
         self._touch_last_used()
 
-    def _wrap_command(self, command: str, cwd: str) -> str:
+    def _wrap_command(self, command: str, cwd: str, **kwargs) -> str:
         # Hermes plans every command's cwd itself and passes it explicitly: without terminal.cwd that is its
         # default for this backend (/root in v0.22.1), which the work container's user (UID 1000) cannot
         # enter, so the command would fail `cd: /root: Permission denied` (exit 126). Run it in the
         # environment's initial cwd (the workspace) instead; any other cwd, the session's own included, passes.
+        # Every keyword goes through unchanged, as in _wait_for_process: the base grows parameters between
+        # Hermes releases (v0.23.3 added `cwd_fallback`, and execute() passes it on every command).
         if self._hermes_default_cwd is not None and cwd == self._hermes_default_cwd:
             cwd = self._initial_cwd
-        return super()._wrap_command(command, cwd)
+        return super()._wrap_command(command, cwd, **kwargs)
 
     def _exec_env_script(self) -> str:
         """The forwarded environment of ONE exec, as shell lines the runner evals (never in an argv, the exec
