@@ -225,7 +225,7 @@ MALFORMED_ENV = {
 @pytest.mark.parametrize("posix", [False, True], ids=["bash", "POSIXLY_CORRECT"])
 @pytest.mark.parametrize("name", list(MALFORMED_ENV))
 def test_malformed_env_section_fails_closed(tmp_path, name, posix):
-    # A builder bug must not run the command with a partial environment (R-H18), whichever line of the
+    # A builder bug must not run the command with a partial environment, whichever line of the
     # section fails, and bash's error message must not echo a forwarded value into the command output.
     marker = tmp_path / "ran"
     value = "v4lue-" + uuid.uuid4().hex

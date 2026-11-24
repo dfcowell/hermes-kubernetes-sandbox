@@ -138,7 +138,7 @@ _DENIED_ENV = frozenset({"BASH_ENV", "ENV", "PATH", "IFS", "SHELLOPTS", "BASHOPT
                          "UID", "EUID", "PPID", "BASHPID", "BASH_VERSINFO", "GROUPS", "BASH_ARGV0",
                          "BASH_SUBSHELL"})
 # LiteLLM proxy keys (LITELLM_API_KEY, LITELLM_MASTER_KEY, ...) and Hindsight memory keys
-# (HINDSIGHT_API_TENANT_API_KEY, ...): Hermes v0.22.1 does not classify them all (R-H20, R-H21).
+# (HINDSIGHT_API_TENANT_API_KEY, ...): Hermes v0.22.1 does not classify them all.
 WITHHELD_ENV_PREFIXES = ("LITELLM_", "HINDSIGHT_")
 _DENIED_ENV_PREFIXES = ("LD_", "KUBERNETES_", "HERMES_", "__hs_", *WITHHELD_ENV_PREFIXES)
 

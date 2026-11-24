@@ -4,7 +4,7 @@ script, the forwarded environment and the caller's stdin arrive on the exec's st
 `read` under LC_ALL=C reads the three lengths and exactly the script and env bytes without
 over-consuming stdin.
 
-The env section (K11) is shell text (`export NAME='value'` / `unset NAME…`) built by the plugin. The
+The env section is shell text (`export NAME='value'` / `unset NAME…`) built by the plugin. The
 runner evals it in ITS OWN shell, so the command inherits the values while no process argv
 (/proc/<pid>/cmdline, `ps`) carries them: the script itself is an argv of the command's bash.
 The eval fails closed: if ANY command of the section fails (a builder bug: a syntax error, a readonly

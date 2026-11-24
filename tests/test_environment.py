@@ -13,7 +13,7 @@ from kubernetes_sandbox.settings import GitCredential, Settings
 from tools.environments.base import EnvironmentConnectionError
 
 S = Settings(runtime_class_name="kata", docker_disk_storage_class="b", ready_timeout_seconds=5)
-ID = Identity("mars", "sess-1")
+ID = Identity("alice", "sess-1")
 
 
 def _env(kube=None, ex=None, settings=S, ident=ID):
@@ -62,9 +62,9 @@ def test_interlock_blocks_creation():
 def test_per_profile_cap():
     kube = FakeKube(ready_after=0)
     s = Settings(runtime_class_name="kata", docker_disk_storage_class="b", max_per_profile=1)
-    kube.create_pod(render_pod(s, Identity("mars", "other"), now_iso="x", created_by="x"))
+    kube.create_pod(render_pod(s, Identity("alice", "other"), now_iso="x", created_by="x"))
     e, _, _ = _env(kube=kube, settings=s)
-    with pytest.raises(EnvironmentConnectionError, match="mars"):
+    with pytest.raises(EnvironmentConnectionError, match="alice"):
         e.ensure_pod()
 
 
@@ -436,7 +436,7 @@ def test_capacity_still_counts_a_pod_with_an_exited_container(why):
     # It still holds the surviving container's resources until it is replaced.
     kube = FakeKube(ready_after=0)
     s = Settings(runtime_class_name="kata", docker_disk_storage_class="b", max_per_profile=1)
-    other = Identity("mars", "other")
+    other = Identity("alice", "other")
     kube.create_pod(render_pod(s, other, now_iso="x", created_by="x"))
     kube.pods[other.pod_name]["status"] = _running_unready(_DOCKER_EXITS[why])
     e, _, _ = _env(kube=kube, settings=s)
@@ -640,12 +640,12 @@ def test_recreate_falls_back_to_initial_cwd_when_mkdir_fails():
 def test_capacity_ignores_finished_and_terminating_pods():
     kube = FakeKube(ready_after=0)
     s = Settings(runtime_class_name="kata", docker_disk_storage_class="b", max_per_profile=1)
-    kube.create_pod(render_pod(s, Identity("mars", "done"), now_iso="x", created_by="x"))
-    kube.create_pod(render_pod(s, Identity("mars", "dying"), now_iso="x", created_by="x"))
-    kube.pods[Identity("mars", "done").pod_name]["status"] = {"phase": "Succeeded"}
-    kube.pods[Identity("mars", "dying").pod_name]["metadata"]["deletionTimestamp"] = "2026-01-01T00:00:00Z"
+    kube.create_pod(render_pod(s, Identity("alice", "done"), now_iso="x", created_by="x"))
+    kube.create_pod(render_pod(s, Identity("alice", "dying"), now_iso="x", created_by="x"))
+    kube.pods[Identity("alice", "done").pod_name]["status"] = {"phase": "Succeeded"}
+    kube.pods[Identity("alice", "dying").pod_name]["metadata"]["deletionTimestamp"] = "2026-01-01T00:00:00Z"
     e, _, _ = _env(kube=kube, settings=s)
-    kube._gets[Identity("mars", "done").pod_name] = -100
+    kube._gets[Identity("alice", "done").pod_name] = -100
     e.ensure_pod()
     assert e._pod_ready
 
@@ -722,7 +722,7 @@ def test_pvc_that_never_finishes_terminating_is_a_connection_error():
 @pytest.mark.parametrize("tamper", [
     lambda md: md["labels"].__setitem__("hermes-sandbox/key-hash", "0000000000"),
     lambda md: md["labels"].pop("app.kubernetes.io/managed-by"),
-    lambda md: md["labels"].__setitem__("hermes-sandbox/profile", "venus"),
+    lambda md: md["labels"].__setitem__("hermes-sandbox/profile", "bob"),
     lambda md: md["annotations"].__setitem__("hermes-sandbox/session-key", "someone-else"),
 ])
 def test_label_mismatched_pvc_is_never_mounted(tamper):
@@ -766,7 +766,7 @@ def test_pvc_quota_exceeded_is_capacity_error():
 def test_pvc_is_not_created_when_the_profile_is_at_capacity():
     kube = FakeKube(ready_after=0)
     s = Settings(runtime_class_name="kata", docker_disk_storage_class="b", max_per_profile=1)
-    kube.create_pod(render_pod(s, Identity("mars", "other"), now_iso="x", created_by="x"))
+    kube.create_pod(render_pod(s, Identity("alice", "other"), now_iso="x", created_by="x"))
     e, _, _ = _env(kube=kube, settings=s)
     with pytest.raises(EnvironmentConnectionError, match="limit reached"):
         e.ensure_pod()
@@ -1184,7 +1184,7 @@ def test_snapshot_file_never_holds_a_forwarded_value(tmp_path, monkeypatch):
     assert "OTHER_VAR" in text and "s3cr3t-snap" not in text
 
 
-# R-H18 (3): hostile values reach the command verbatim through the real RUNNER (bash) and never execute.
+# Hostile values reach the command verbatim through the real RUNNER (bash) and never execute.
 _HOSTILE = ["$(touch {m})", "`touch {m}`", "'; touch {m}; '", "\"; touch {m}; \"", "a\nexport X=1; touch {m}",
             "\\n\\x41 $HOME ${{PATH}} !! *", "-n", "tab\there", "ünï ☃", "x' \"$(touch {m})\" '", "", " lead"]
 
@@ -1228,7 +1228,7 @@ def test_nul_in_a_forwarded_value_is_refused_end_to_end(monkeypatch):
 
 @pytest.mark.parametrize("secret", ["OPENAI_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "AUXILIARY_VISION_API_KEY"])
 def test_hermes_declared_secret_in_forward_env_is_not_forwarded(monkeypatch, secret):
-    """R-H17 (b): against Hermes v0.22.1's real resolve_passthrough_env and credential predicates, no mock.
+    """Against Hermes v0.22.1's real resolve_passthrough_env and credential predicates, no mock.
     Hermes treats explicit forwards (docker_forward_env) as an operator opt-in that bypasses its scrub, so the
     plugin applies Hermes's own credential check to forward_env before asking Hermes to resolve it."""
     from tools.environments.remote_common import resolve_passthrough_env
@@ -1244,7 +1244,7 @@ def test_hermes_declared_secret_in_forward_env_is_not_forwarded(monkeypatch, sec
 
 
 def test_litellm_keys_are_withheld_per_exec_even_when_implicit(_isolated_hermes_home, monkeypatch):
-    """R-H20 (b): Hermes v0.22.1 does not classify LITELLM_* keys, so the plugin withholds them itself, on every
+    """Hermes v0.22.1 does not classify LITELLM_* keys, so the plugin withholds them itself, on every
     name the resolver returns: here they arrive IMPLICITLY via the real terminal.env_passthrough (config.yaml),
     never passing through forward_env, and directly via a forward_env that bypassed settings validation."""
     (_isolated_hermes_home / "config.yaml").write_text(
@@ -1263,7 +1263,7 @@ def test_litellm_keys_are_withheld_per_exec_even_when_implicit(_isolated_hermes_
 
 
 def test_hindsight_keys_are_withheld_per_exec_even_when_implicit(_isolated_hermes_home, monkeypatch):
-    """R-H21: Hermes v0.22.1 does not classify HINDSIGHT_* (its catalog memory provider's keys), so the plugin
+    """Hermes v0.22.1 does not classify HINDSIGHT_* (its catalog memory provider's keys), so the plugin
     withholds them itself on every exec: implicitly via terminal.env_passthrough and via a forward_env that
     bypassed settings validation. Memory keys never enter a sandbox."""
     (_isolated_hermes_home / "config.yaml").write_text(
@@ -1283,7 +1283,7 @@ def test_hindsight_keys_are_withheld_per_exec_even_when_implicit(_isolated_herme
 
 
 def test_real_predicate_forwards_an_unclassified_token():
-    """R-H20 I3 positive control against Hermes's REAL credential check: a forge token name Hermes does not
+    """Positive control against Hermes's REAL credential check: a forge token name Hermes does not
     manage IS forwarded. A Hermes bump that starts classifying *_TOKEN shapes fails here."""
     import os
     s = Settings(runtime_class_name="kata", docker_disk_storage_class="b", forward_env=("ACME_FORGE_TOKEN",))
@@ -1312,7 +1312,7 @@ def _broken_predicate(monkeypatch, how):
 
 @pytest.mark.parametrize("how", ["missing", "raising"])
 def test_unclassifiable_names_are_withheld(monkeypatch, caplog, how):
-    """R-H20 I2: if Hermes's credential check cannot be imported or raises, NO forward_env name or value is
+    """If Hermes's credential check cannot be imported or raises, NO forward_env name or value is
     emitted (fail closed), with a distinct log line, and the name is not marked as warned (it is retried)."""
     monkeypatch.setenv("HS_FWD_TEST", "v4lue-closed")
     _broken_predicate(monkeypatch, how)
@@ -1358,7 +1358,7 @@ def hermes_registered():
     from tools import terminal_tool as tt
     keys = []
 
-    def register(env, key="profile:mars:sess-1", age=1900.0):
+    def register(env, key="profile:alice:sess-1", age=1900.0):
         with tt._env_lock:
             tt._active_environments[key] = env
             tt._last_activity[key] = time.time() - age
@@ -1383,7 +1383,7 @@ def test_execute_marks_hermes_idle_clock(hermes_registered):
 def test_keepalive_leaves_envs_hermes_no_longer_tracks(hermes_registered):
     from tools import terminal_tool as tt
     e, _, _ = _env()
-    other, _, _ = _env(ident=Identity("mars", "sess-2"))
+    other, _, _ = _env(ident=Identity("alice", "sess-2"))
     key = hermes_registered(other)
     before = dict(tt._last_activity)
     e.execute("echo hi")  # e is in no Hermes table (torn down, or never registered): nothing is (re)inserted

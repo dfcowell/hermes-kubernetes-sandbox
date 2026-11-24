@@ -1,8 +1,8 @@
 """SansIOConnection against a real TLS 1.3 websocket server (websockets' own Sans-I/O ServerProtocol on a
 thread). The property that matters is the first test: every socket read and write happens on the calling
 thread. websockets' sync client reads on a background thread while the caller writes, and OpenSSL does not
-allow one SSL object to be used from two threads at once (CPython gh-143756): on 2026-10-27 that crashed the
-Hermes gateway with SIGSEGV three times in a week, always in this exec path."""
+allow one SSL object to be used from two threads at once (CPython gh-143756), which crashes the Hermes
+gateway with SIGSEGV in this exec path."""
 import shutil
 import socket
 import ssl

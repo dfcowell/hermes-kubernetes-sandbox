@@ -17,7 +17,7 @@ thread while the caller writes, and OpenSSL does not allow one SSL object to be 
 once. CPython does not serialise the two (gh-143756, open; its lock was reverted in 3.13.7 because it
 deadlocked exactly this pattern), so the race corrupts OpenSSL's state: under TLS 1.3 the session tickets
 the server sends right after the TLS handshake are read while the upgrade request is written, and the
-Hermes gateway died with SIGSEGV in this path three times in a week (2026-10). A local reproduction
+Hermes gateway dies with SIGSEGV in this path. A local reproduction
 (scripts/exec-tls-stress.py) crashes the sync client in under a minute on Python 3.12, 3.13 and 3.14."""
 from __future__ import annotations
 

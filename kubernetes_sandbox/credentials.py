@@ -1,4 +1,4 @@
-"""Git authentication inside the sandbox, from forwarded environment only (K11).
+"""Git authentication inside the sandbox, from forwarded environment only.
 
 git reads `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` as command-scope configuration
 (git >= 2.31), read after the system and global files. Per configured URL this sets

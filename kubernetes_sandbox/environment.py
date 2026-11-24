@@ -182,7 +182,7 @@ class KubernetesEnvironment(BaseEnvironment):
         self._had_pod = False
         self._pod_uid: str | None = None
         self._bootstrap_attempted = False
-        # Names whose values are forwarded per exec (K11). Monotonic: a name stays excluded from the session
+        # Names whose values are forwarded per exec. Monotonic: a name stays excluded from the session
         # snapshot after its value is gone, so an old value cannot persist there.
         self._exec_env_names: set[str] = set(settings.forward_env) | credential_names(settings.git_credentials)
 
@@ -474,7 +474,7 @@ class KubernetesEnvironment(BaseEnvironment):
         the process's RAW owner task id. A multiplexed gateway keys a routed profile's env
         `profile:<name>:<key>`, so the check never matches and the sandbox is torn down `TERMINAL_LIFETIME_SECONDS`
         after the last foreground command while e.g. a background coding agent is mid-task (Hermes v0.22.1 and
-        v0.22.5; homelab 2026-10-28). Hermes's background-process poller executes in the env every ~2 s while
+        v0.22.5). Hermes's background-process poller executes in the env every ~2 s while
         the process runs, so refreshing here keeps exactly those envs. Only an env Hermes still tracks is
         touched (found by identity, never inserted); missing internals make this a no-op."""
         try:
