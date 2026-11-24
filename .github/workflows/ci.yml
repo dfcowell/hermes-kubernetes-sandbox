@@ -6,10 +6,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Every Hermes release the lab runs: v0.23.3 (dev and prod since 2026-11-22). Add the next release's row
-        # BEFORE the lab bumps to it (v0.23.3 changed _wrap_command's signature and broke every command), and drop a
-        # row once no environment runs it.
+        # Every supported Hermes release, oldest first. Rows stay after the lab moves on: the plugin keeps working
+        # on older Hermes for other users. Add the next release's row BEFORE the lab bumps to it (v0.23.3 changed
+        # _wrap_command's signature and broke every command); the lab runs v0.23.3 on dev and prod since 2026-11-22.
         hermes:
+          - { tag: v0.22.1, commit: 297552a9d646119871391d202509822cd86330df }
+          - { tag: v0.22.5, commit: bf0203a794a07aac3ff764972ab9087baa4e4f4e }
+          - { tag: v0.23.1, commit: 3b421578588243f920886e6fe79a6faa87ea026e }
           - { tag: v0.23.3, commit: caafe5389ae585ef77387a962aee05b1bcf17029 }
     name: test (Hermes ${{ matrix.hermes.tag }})
     steps:
