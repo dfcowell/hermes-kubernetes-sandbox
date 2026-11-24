@@ -6,11 +6,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Every Hermes release the lab runs: v0.22.1 (prod until its bump) and v0.22.5 (dev since 2026-10-28). Drop a
+        # Every Hermes release the lab runs: v0.23.3 (dev and prod since 2026-11-22). Add the next release's row
+        # BEFORE the lab bumps to it (v0.23.3 changed _wrap_command's signature and broke every command), and drop a
         # row once no environment runs it.
         hermes:
-          - { tag: v0.22.1, commit: 297552a9d646119871391d202509822cd86330df }
-          - { tag: v0.22.5, commit: bf0203a794a07aac3ff764972ab9087baa4e4f4e }
+          - { tag: v0.23.3, commit: caafe5389ae585ef77387a962aee05b1bcf17029 }
     name: test (Hermes ${{ matrix.hermes.tag }})
     steps:
       - uses: actions/checkout@v4

@@ -500,14 +500,16 @@ class KubernetesEnvironment(BaseEnvironment):
             self.init_session()
         self._touch_last_used()
 
-    def _wrap_command(self, command: str, cwd: str) -> str:
+    def _wrap_command(self, command: str, cwd: str, **kwargs) -> str:
         # Hermes plans every command's cwd itself and passes it explicitly: without terminal.cwd that is its
         # default for this backend (/root in v0.22.1), which the work container's user (UID 1000) cannot
         # enter, so the command would fail `cd: /root: Permission denied` (exit 126). Run it in the
         # environment's initial cwd (the workspace) instead; any other cwd, the session's own included, passes.
+        # Every keyword goes through unchanged, as in _wait_for_process: the base grows parameters between
+        # Hermes releases (v0.23.3 added `cwd_fallback`, and execute() passes it on every command).
         if self._hermes_default_cwd is not None and cwd == self._hermes_default_cwd:
             cwd = self._initial_cwd
-        return super()._wrap_command(command, cwd)
+        return super()._wrap_command(command, cwd, **kwargs)
 
     def _exec_env_script(self) -> str:
         """The forwarded environment of ONE exec, as shell lines the runner evals (never in an argv, the exec
